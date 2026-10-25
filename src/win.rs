@@ -223,28 +223,14 @@ pub fn file_icon(path: &str, is_dir: bool, generic: bool) -> Option<IconImage> {
     img
 }
 
-fn icon_to_rgba(icon: HICON) -> Option<IconImage> {
+/// Pixels of a GDI bitmap as top-down BGRA.
+fn bitmap_bgra(hbm: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<(usize, usize, Vec<u8>)> {
     unsafe {
-        let mut ii = ICONINFO::default();
-        GetIconInfo(icon, &mut ii).ok()?;
-        let cleanup = |ii: &ICONINFO| {
-            if !ii.hbmColor.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(ii.hbmColor.0));
-            }
-            if !ii.hbmMask.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(ii.hbmMask.0));
-            }
-        };
-        if ii.hbmColor.is_invalid() {
-            cleanup(&ii);
-            return None;
-        }
         let mut bm = BITMAP::default();
-        if GetObjectW(HGDIOBJ(ii.hbmColor.0), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut c_void)) == 0 {
-            cleanup(&ii);
+        if GetObjectW(HGDIOBJ(hbm.0), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut c_void)) == 0 {
             return None;
         }
-        let (w, h) = (bm.bmWidth as usize, bm.bmHeight as usize);
+        let (w, h) = (bm.bmWidth as usize, bm.bmHeight.unsigned_abs() as usize);
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -259,15 +245,53 @@ fn icon_to_rgba(icon: HICON) -> Option<IconImage> {
         };
         let dc = GetDC(None);
         let mut bgra = vec![0u8; w * h * 4];
-        let lines = GetDIBits(dc, ii.hbmColor, 0, h as u32, Some(bgra.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS);
-        let mut mask = vec![0u8; w * h * 4];
-        let has_mask = !ii.hbmMask.is_invalid()
-            && GetDIBits(dc, ii.hbmMask, 0, h as u32, Some(mask.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS) > 0;
+        let lines = GetDIBits(dc, hbm, 0, h as u32, Some(bgra.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS);
         ReleaseDC(None, dc);
-        cleanup(&ii);
-        if lines == 0 {
-            return None;
+        (lines > 0).then_some((w, h, bgra))
+    }
+}
+
+/// Explorer's thumbnail for a file or folder (pictures, videos, documents),
+/// falling back to its large icon, scaled to fit `size` pixels.
+pub fn shell_thumbnail(path: &Path, size: i32) -> Option<IconImage> {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::System::Com::IBindCtx;
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_RESIZETOFIT};
+    let w = wide_path(path);
+    unsafe {
+        let factory: IShellItemImageFactory = SHCreateItemFromParsingName(pcwstr(&w), None::<&IBindCtx>).ok()?;
+        let hbm = factory.GetImage(SIZE { cx: size, cy: size }, SIIGBF_RESIZETOFIT).ok()?;
+        let pixels = bitmap_bgra(hbm);
+        let _ = DeleteObject(HGDIOBJ(hbm.0));
+        let (w, h, bgra) = pixels?;
+        // 32-bit shell bitmaps are premultiplied; all-zero alpha means opaque.
+        let has_alpha = bgra.chunks_exact(4).any(|p| p[3] != 0);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for p in bgra.chunks_exact(4) {
+            let a = if has_alpha { p[3] } else { 255 };
+            let un = |c: u8| if a == 0 || a == 255 { c } else { ((c as u32 * 255) / a as u32).min(255) as u8 };
+            rgba.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), a]);
         }
+        Some(IconImage { width: w, height: h, rgba })
+    }
+}
+
+fn icon_to_rgba(icon: HICON) -> Option<IconImage> {
+    unsafe {
+        let mut ii = ICONINFO::default();
+        GetIconInfo(icon, &mut ii).ok()?;
+        let color = (!ii.hbmColor.is_invalid()).then(|| bitmap_bgra(ii.hbmColor)).flatten();
+        let mask = (!ii.hbmMask.is_invalid()).then(|| bitmap_bgra(ii.hbmMask)).flatten();
+        for hbm in [ii.hbmColor, ii.hbmMask] {
+            if !hbm.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(hbm.0));
+            }
+        }
+        let (w, h, bgra) = color?;
+        // Monochrome masks of colour icons have the colour bitmap's size.
+        let mask = mask.filter(|(mw, mh, _)| *mw == w && *mh >= h).map(|(_, _, m)| m);
+        let has_mask = mask.is_some();
+        let mask = mask.unwrap_or_default();
         let has_alpha = bgra.chunks_exact(4).any(|p| p[3] != 0);
         let mut rgba = Vec::with_capacity(w * h * 4);
         for (i, p) in bgra.chunks_exact(4).enumerate() {

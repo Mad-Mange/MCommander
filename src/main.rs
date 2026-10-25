@@ -17,6 +17,7 @@ mod rename;
 mod search;
 mod sync;
 mod theme;
+mod thumbs;
 mod tree;
 mod ui;
 mod vfs;

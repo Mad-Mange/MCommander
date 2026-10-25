@@ -104,6 +104,7 @@ pub struct App {
     pub active: Side,
     pub zips: ArchiveCache,
     pub icons: IconCache,
+    pub thumbs: crate::thumbs::ThumbCache,
     pub cmdline: String,
     /// The command line has the keyboard (letter quick-search modes).
     pub cmd_active: bool,
@@ -187,6 +188,7 @@ impl App {
             active: if cfg.active_right { Side::Right } else { Side::Left },
             zips: ArchiveCache::default(),
             icons: IconCache::new(ctx.clone()),
+            thumbs: crate::thumbs::ThumbCache::new(ctx.clone()),
             cmdline: String::new(),
             cmd_active: false,
             pending: Vec::new(),
@@ -680,6 +682,7 @@ impl App {
             }
         }
         self.icons.poll(ctx);
+        self.thumbs.poll(ctx);
         self.poll_jobs();
         if let Some(t) = &self.toast {
             if t.at.elapsed() > Duration::from_secs(4) {
@@ -760,7 +763,8 @@ impl App {
             return;
         }
 
-        let brief = self.atab().view == ViewMode::Brief;
+        // Left/Right move the cursor in the column-based views.
+        let brief = self.atab().view != ViewMode::Full;
         let kc = KeyCtx { cmdline_empty: self.cmdline.is_empty(), brief };
         let qs_mode = self.cfg.quick_search;
         let letters_mode = matches!(qs_mode, QuickSearchMode::Letters | QuickSearchMode::LettersDialog);
@@ -1155,8 +1159,12 @@ impl App {
         let other = side.other();
         let lo = self.list_opts();
         match cmd {
-            Up => self.atab_mut().move_cursor(-1),
-            Down => self.atab_mut().move_cursor(1),
+            Up | Down => {
+                // In the thumbnails grid Up/Down move by a whole row.
+                let tab = self.atab_mut();
+                let step = if tab.view == ViewMode::Thumbs { tab.grid_cols.max(1) as isize } else { 1 };
+                tab.move_cursor(if cmd == Up { -step } else { step });
+            }
             PageUp => {
                 let n = self.page_step();
                 self.atab_mut().move_cursor(-n);
@@ -1170,13 +1178,11 @@ impl App {
                 let n = self.atab().entries.len();
                 self.atab_mut().set_cursor(n.saturating_sub(1));
             }
-            Left => {
-                let rows = self.atab().page_rows.max(1) as isize;
-                self.atab_mut().move_cursor(-rows);
-            }
-            Right => {
-                let rows = self.atab().page_rows.max(1) as isize;
-                self.atab_mut().move_cursor(rows);
+            Left | Right => {
+                // Brief view: a column of entries; thumbnails: one entry.
+                let tab = self.atab_mut();
+                let step = if tab.view == ViewMode::Thumbs { 1 } else { tab.page_rows.max(1) as isize };
+                tab.move_cursor(if cmd == Left { -step } else { step });
             }
             SelectUp | SelectDown => {
                 let tab = self.atab_mut();
@@ -1279,8 +1285,12 @@ impl App {
                     None,
                 );
             }
-            Brief | Full => {
-                self.atab_mut().view = if cmd == Brief { ViewMode::Brief } else { ViewMode::Full };
+            Brief | Full | Thumbnails => {
+                self.atab_mut().view = match cmd {
+                    Brief => ViewMode::Brief,
+                    Thumbnails => ViewMode::Thumbs,
+                    _ => ViewMode::Full,
+                };
                 self.atab_mut().follow_cursor = true;
             }
             SortBy(col) => {
@@ -1654,7 +1664,11 @@ impl App {
     fn page_step(&self) -> isize {
         let tab = self.atab();
         let rows = tab.page_rows.max(1) as isize;
-        if tab.view == ViewMode::Brief { rows * 2 } else { (rows - 1).max(1) }
+        match tab.view {
+            ViewMode::Brief => rows * 2,
+            ViewMode::Thumbs => rows * tab.grid_cols.max(1) as isize,
+            ViewMode::Full => (rows - 1).max(1),
+        }
     }
 
     // ---- dialogs that prepare operations ------------------------------------------------

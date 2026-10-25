@@ -107,6 +107,8 @@ pub struct Tab {
     pub follow_cursor: bool,
     /// Rows that fit in the list area (updated while drawing).
     pub page_rows: usize,
+    /// Columns of the thumbnails grid (1 in the other views).
+    pub grid_cols: usize,
     pub loaded_at: Instant,
     pub locked: bool,
 }
@@ -133,6 +135,7 @@ impl Tab {
             anchor: None,
             follow_cursor: true,
             page_rows: 20,
+            grid_cols: 1,
             loaded_at: Instant::now(),
             locked: false,
         }

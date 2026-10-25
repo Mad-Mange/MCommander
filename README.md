@@ -23,7 +23,7 @@ Total Commander's workflow and key layout, rebuilt from scratch, with light and 
 
 If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd> and <kbd>Num +</kbd>, MCommander will feel at home on the first keystroke. It reads your existing Total Commander `wincmd.ini` on first start, so your directory hotlist, command-line history, panel paths, sort order and quick-search style come along.
 
-- **Two panels with folder tabs**: full and brief views, sortable and resizable columns, history, hotlist and drive buttons.
+- **Two panels with folder tabs**: full, brief and thumbnail views (Explorer's previews of photos, videos and documents), sortable and resizable columns, history, hotlist and drive buttons.
 - **The Total Commander keyboard layout**: F-keys, Num +/-/\*, Ctrl+Alt quick search (or letter-only, as in TC), Ctrl+Left/Right, Ctrl+U and the rest. Press <kbd>F1</kbd> in the app for the full list.
 - **Background file operations**: copy, move, delete (recycle bin or permanent) and rename on the fly with masks such as `*.bak`. They show progress, speed, cancel and an overwrite dialog (overwrite / skip / older / auto-rename, each with an "all" variant).
 - **Archives open like folders**: ZIP, 7z, RAR and tar (plain, .gz, .xz, .bz2, .zst). Browse with Enter, copy files out, unpack (Alt+F9) and test. You can also pack (Alt+F5) to ZIP, 7z or tar.gz/xz/bz2. ZIP archives can additionally be edited in place: copy files in, delete inside. Everything runs in-process with exact Unicode names, without needing 7-Zip.
@@ -88,6 +88,7 @@ The release build is a single self-contained `mcommander.exe`; copy it anywhere 
 | <kbd>F7</kbd> | New folder | <kbd>Ctrl</kbd>+<kbd>M</kbd> | Multi-Rename Tool |
 | <kbd>F8</kbd> / <kbd>Del</kbd> | Delete (Shift: permanently) | <kbd>Ctrl</kbd>+<kbd>T</kbd> / <kbd>Ctrl</kbd>+<kbd>W</kbd> | New tab / close tab |
 | <kbd>Alt</kbd>+<kbd>F5</kbd> / <kbd>Alt</kbd>+<kbd>F9</kbd> | Pack / unpack | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quick view panel |
+| <kbd>Ctrl</kbd>+<kbd>F1</kbd> / <kbd>F2</kbd> | Brief / full view | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F1</kbd> | Thumbnails view |
 | <kbd>Alt</kbd>+<kbd>F1</kbd> / <kbd>F2</kbd> | Choose drive | <kbd>Ctrl</kbd>+<kbd>U</kbd> | Swap panels |
 | <kbd>Alt</kbd>+<kbd>F10</kbd> | Directory tree | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Branch view (all subfolder files) |
 | <kbd>F9</kbd> / <kbd>F10</kbd> | Main menu (also <kbd>Alt</kbd>+underlined letter) | <kbd>Shift</kbd>+<kbd>F10</kbd> | Explorer context menu |
@@ -129,7 +130,7 @@ The app accepts `--keys=` scripts for end-to-end UI checks. The steps are comma 
 
 ## Not (yet) included
 
-Coming from Total Commander, you will miss FTP/SFTP, plugins (WCX/WFX/WLX/WDX), thumbnails view, custom columns, a configurable button bar, multi-file property sheets, and updating 7z/tar archives in place (they are read-only; only ZIP can be modified). RAR archives can be read but not created. Pull requests are welcome.
+Coming from Total Commander, you will miss FTP/SFTP, plugins (WCX/WFX/WLX/WDX), custom columns, a configurable button bar, multi-file property sheets, and updating 7z/tar archives in place (they are read-only; only ZIP can be modified). RAR archives can be read but not created. Pull requests are welcome.
 
 ## About this project
 

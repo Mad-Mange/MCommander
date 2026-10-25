@@ -40,6 +40,7 @@ pub enum Cmd {
     // View
     Brief,
     Full,
+    Thumbnails,
     SortBy(SortColumn),
     ReverseSort,
     ShowAll,
@@ -221,6 +222,7 @@ pub fn map_key(key: Key, m: Modifiers, kc: KeyCtx) -> Option<Cmd> {
         Key::F9 | Key::F10 if none => MenuOpen(0),
         Key::F1 if ctrl => Brief,
         Key::F2 if ctrl => Full,
+        Key::F1 if ctrl_shift => Thumbnails,
         Key::F3 if ctrl => SortBy(SortColumn::Name),
         Key::F4 if ctrl => SortBy(SortColumn::Ext),
         Key::F5 if ctrl => SortBy(SortColumn::Date),
@@ -333,6 +335,7 @@ pub fn main_menu() -> Vec<(&'static str, Vec<MenuItem>)> {
             vec![
                 item("Brief", "Ctrl+F1", Brief),
                 item("Full", "Ctrl+F2", Full),
+                item("Thumbnails", "Ctrl+Shift+F1", Thumbnails),
                 item("Quick View Panel", "Ctrl+Q", QuickView),
                 item("New Folder Tab", "Ctrl+T", NewTab),
                 SEP,
@@ -412,6 +415,7 @@ pub const KEYBOARD_HELP: &[(&str, &str)] = &[
     ("Ctrl+\\", "Root directory"),
     ("Ctrl+Left / Ctrl+Right", "Open directory in left / right panel"),
     ("Ctrl+F1 / Ctrl+F2", "Brief / full view"),
+    ("Ctrl+Shift+F1", "Thumbnails view"),
     ("Ctrl+F3..F7", "Sort by name / extension / time / size / unsorted"),
     ("Ctrl+F10 / F11 / F12", "All files / programs / custom filter"),
     ("Ctrl+A", "Select all"),

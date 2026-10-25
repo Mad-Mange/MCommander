@@ -9,6 +9,7 @@ pub enum Icon {
     Brief,
     Full,
     QuickView,
+    Thumbs,
     Branch,
     Invert,
     Back,
@@ -130,11 +131,23 @@ pub fn paint(pt: &Painter, rect: Rect, icon: Icon, fg: Color32) {
                 pt.line_segment([g.p(4.6, y + 1.0), g.p(14.5, y + 1.0)], g.s(1.0, GREY));
             }
         }
-        Icon::QuickView => {
+        Icon::Thumbs => {
             pt.rect_filled(g.rect(1.0, 2.0, 15.0, 14.0), 1.0, Color32::from_rgb(0x5A, 0x9B, 0x5A));
             pt.add(Shape::convex_polygon(vec![g.p(2.0, 13.0), g.p(7.0, 6.0), g.p(11.0, 13.0)], Color32::from_rgb(0x3E, 0x6B, 0x3E), Stroke::NONE));
             pt.circle_filled(g.p(11.5, 5.5), 1.8 * g.k, YELLOW);
             pt.rect_stroke(g.rect(1.0, 2.0, 15.0, 14.0), 1.0, g.s(1.2, BROWN), StrokeKind::Inside);
+        }
+        Icon::QuickView => {
+            // Two panels; the right one previews a picture.
+            pt.rect_stroke(g.rect(0.5, 2.0, 15.5, 14.0), 1.0, g.s(1.0, GREY), StrokeKind::Inside);
+            pt.line_segment([g.p(8.0, 2.0), g.p(8.0, 14.0)], g.s(1.0, GREY));
+            for i in 0..4 {
+                let y = 4.5 + i as f32 * 2.4;
+                pt.line_segment([g.p(2.0, y), g.p(6.5, y)], g.s(0.8, BLUE));
+            }
+            pt.rect_filled(g.rect(9.2, 4.0, 14.3, 12.0), 0.0, Color32::from_rgb(0x5A, 0x9B, 0x5A));
+            pt.circle_filled(g.p(12.6, 5.8), 0.9 * g.k, YELLOW);
+            pt.add(Shape::convex_polygon(vec![g.p(9.2, 12.0), g.p(11.0, 8.0), g.p(13.0, 12.0)], Color32::from_rgb(0x3E, 0x6B, 0x3E), Stroke::NONE));
         }
         Icon::Branch => {
             folder(pt, &g, 1.0, 0.5, 7.0, 5.5);

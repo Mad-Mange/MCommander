@@ -89,6 +89,7 @@ pub fn checked(app: &App, cmd: &Cmd) -> Option<bool> {
     Some(match cmd {
         Cmd::Brief => tab.view == ViewMode::Brief,
         Cmd::Full => tab.view == ViewMode::Full,
+        Cmd::Thumbnails => tab.view == ViewMode::Thumbs,
         Cmd::SortBy(c) => tab.sort.column == *c,
         Cmd::ReverseSort => tab.sort.reverse,
         Cmd::ShowAll => tab.filter == FileFilter::All,
@@ -196,8 +197,10 @@ fn toolbar(app: &mut App, ui: &mut Ui) {
         let brief = app.atab().view == ViewMode::Brief;
         tool_button(app, ui, Icon::Refresh, "Reread source (Ctrl+R)", Cmd::Reread, false);
         tool_sep(ui, &pal);
+        let view = app.atab().view;
         tool_button(app, ui, Icon::Brief, "Brief view (Ctrl+F1)", Cmd::Brief, brief);
-        tool_button(app, ui, Icon::Full, "Full view (Ctrl+F2)", Cmd::Full, !brief);
+        tool_button(app, ui, Icon::Full, "Full view (Ctrl+F2)", Cmd::Full, view == ViewMode::Full);
+        tool_button(app, ui, Icon::Thumbs, "Thumbnails (Ctrl+Shift+F1)", Cmd::Thumbnails, view == ViewMode::Thumbs);
         tool_button(app, ui, Icon::QuickView, "Quick view panel (Ctrl+Q)", Cmd::QuickView, app.quick_view);
         tool_sep(ui, &pal);
         let branch = app.atab().branch;
@@ -717,15 +720,25 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     let pal = app.pal.clone();
     let rh = row_h(app);
     let view = app.tab(side).view;
-    let list_rect = Rect::from_min_max(rect.min, pos2(rect.right() - if view == ViewMode::Full { SCROLL_W } else { 0.0 }, rect.bottom()));
+    let list_rect = Rect::from_min_max(rect.min, pos2(rect.right() - if view != ViewMode::Brief { SCROLL_W } else { 0.0 }, rect.bottom()));
     let rows = ((list_rect.height() - if view == ViewMode::Brief { SCROLL_W } else { 0.0 }) / rh).floor().max(1.0) as usize;
     let n = app.tab(side).entries.len();
     // Brief view lays entries out in columns of `rows` entries.
     let col_w = 190.0f32.min(list_rect.width());
     let ncols_vis = ((list_rect.width() / col_w).floor() as usize).max(1);
+    // Thumbnails view: a grid of square cells with the name underneath.
+    let cell = vec2(THUMB_CELL, THUMB_CELL + rh);
+    let tcols = ((list_rect.width() / cell.x).floor() as usize).max(1);
+    let trows = ((list_rect.height() / cell.y).floor() as usize).max(1);
+    let max_top = match view {
+        ViewMode::Full => n.saturating_sub(rows),
+        ViewMode::Brief => (n.saturating_sub(1) / rows).saturating_sub(ncols_vis - 1) * rows,
+        ViewMode::Thumbs => n.div_ceil(tcols).saturating_sub(trows) * tcols,
+    };
     {
         let tab = app.tab_mut(side);
-        tab.page_rows = rows;
+        tab.page_rows = if view == ViewMode::Thumbs { trows } else { rows };
+        tab.grid_cols = if view == ViewMode::Thumbs { tcols } else { 1 };
         if tab.follow_cursor {
             match view {
                 ViewMode::Full => {
@@ -744,13 +757,18 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
                         tab.top = (col + 1 - ncols_vis) * rows;
                     }
                 }
+                ViewMode::Thumbs => {
+                    let row = tab.cursor / tcols;
+                    let first = tab.top / tcols;
+                    if row < first {
+                        tab.top = row * tcols;
+                    } else if row >= first + trows {
+                        tab.top = (row + 1 - trows) * tcols;
+                    }
+                }
             }
             tab.follow_cursor = false;
         }
-        let max_top = match view {
-            ViewMode::Full => n.saturating_sub(rows),
-            ViewMode::Brief => (n.saturating_sub(1) / rows).saturating_sub(ncols_vis - 1) * rows,
-        };
         tab.top = tab.top.min(max_top);
     }
 
@@ -760,12 +778,13 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         let lines = wheel_lines(ui, rh, rows);
         if lines != 0 {
             let tab = app.tab_mut(side);
-            let step = lines.unsigned_abs() * if view == ViewMode::Brief { rows } else { 1 };
-            tab.top = if lines > 0 { tab.top.saturating_sub(step) } else { tab.top + step };
-            let max_top = match view {
-                ViewMode::Full => n.saturating_sub(rows),
-                ViewMode::Brief => (n.saturating_sub(1) / rows).saturating_sub(ncols_vis - 1) * rows,
+            let step = match view {
+                ViewMode::Full => lines.unsigned_abs(),
+                ViewMode::Brief => lines.unsigned_abs() * rows,
+                // One grid row per wheel notch (three "lines").
+                ViewMode::Thumbs => lines.unsigned_abs().div_ceil(3) * tcols,
             };
+            tab.top = if lines > 0 { tab.top.saturating_sub(step) } else { tab.top + step };
             tab.top = tab.top.min(max_top);
         }
     }
@@ -783,6 +802,14 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
                 }
                 let col = ((p.x - list_rect.left()) / col_w).floor() as usize;
                 top + col * rows + row
+            }
+            ViewMode::Thumbs => {
+                let col = ((p.x - list_rect.left()) / cell.x).floor() as usize;
+                let row = ((p.y - list_rect.top()) / cell.y).floor() as usize;
+                if col >= tcols {
+                    return None;
+                }
+                top + row * tcols + col
             }
         };
         (i < n).then_some(i)
@@ -854,10 +881,17 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     let visible: Vec<usize> = match view {
         ViewMode::Full => (top..(top + rows + 1).min(n)).collect(),
         ViewMode::Brief => (top..(top + rows * (ncols_vis + 1)).min(n)).collect(),
+        ViewMode::Thumbs => (top..(top + tcols * (trows + 1)).min(n)).collect(),
     };
     let cursor = app.tab(side).cursor;
     for i in visible {
         let e = app.tab(side).entries[i].clone();
+        if view == ViewMode::Thumbs {
+            let rel = i - top;
+            let r = Rect::from_min_size(list_rect.min + vec2((rel % tcols) as f32 * cell.x, (rel / tcols) as f32 * cell.y), cell);
+            draw_thumb_cell(app, ui, &painter, r, &e, &loc, i == cursor && active_panel, renaming == Some(i));
+            continue;
+        }
         let (row_rect, name_w) = match view {
             ViewMode::Full => {
                 let y = list_rect.top() + (i - top) as f32 * rh;
@@ -869,6 +903,7 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
                 let r = Rect::from_min_size(pos2(list_rect.left() + col as f32 * col_w, list_rect.top() + row as f32 * rh), vec2(col_w, rh));
                 (r, col_w)
             }
+            ViewMode::Thumbs => unreachable!("drawn above"),
         };
         if i == cursor && active_panel {
             painter.rect_filled(row_rect.shrink2(vec2(1.0, 0.0)), 0.0, pal.cursor_fill);
@@ -920,12 +955,18 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
 
     // Inline rename editor.
     if let Some(r) = app.rename.as_mut().filter(|r| r.side == side) {
-        if r.index >= top && (view == ViewMode::Brief || r.index < top + rows) {
+        let visible_rows = if view == ViewMode::Thumbs { trows * tcols } else { rows };
+        if r.index >= top && (view == ViewMode::Brief || r.index < top + visible_rows) {
             let row_rect = match view {
                 ViewMode::Full => Rect::from_min_size(pos2(list_rect.left() + 21.0, list_rect.top() + (r.index - top) as f32 * rh - 1.0), vec2(cols[0] + cols[1] - 22.0, rh + 2.0)),
                 ViewMode::Brief => {
                     let rel = r.index - top;
                     Rect::from_min_size(pos2(list_rect.left() + (rel / rows) as f32 * col_w + 21.0, list_rect.top() + (rel % rows) as f32 * rh - 1.0), vec2(col_w - 22.0, rh + 2.0))
+                }
+                ViewMode::Thumbs => {
+                    let rel = r.index - top;
+                    let c = list_rect.min + vec2((rel % tcols) as f32 * cell.x, (rel / tcols) as f32 * cell.y);
+                    Rect::from_min_size(c + vec2(2.0, THUMB_CELL - 1.0), vec2(cell.x - 4.0, rh + 2.0))
                 }
             };
             let id = egui::Id::unique("inline-rename");
@@ -951,28 +992,70 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         }
     }
 
-    // Scroll bar (full view: vertical; brief view: horizontal).
+    // Scroll bar (full and thumbnails view: vertical; brief view: horizontal).
+    // `unit` = entries per scroll step (a row, a column or a grid row).
+    let vtrack = Rect::from_min_max(pos2(list_rect.right(), rect.top()), rect.max);
     match view {
-        ViewMode::Full => {
-            let track = Rect::from_min_max(pos2(list_rect.right(), rect.top()), rect.max);
-            scrollbar(app, ui, track, side, n, rows, true);
-        }
+        ViewMode::Full => scrollbar(app, ui, vtrack, side, n, rows, true, 1),
+        ViewMode::Thumbs => scrollbar(app, ui, vtrack, side, n.div_ceil(tcols), trows, true, tcols),
         ViewMode::Brief => {
             let track = Rect::from_min_max(pos2(rect.left(), rect.bottom() - SCROLL_W), rect.max);
             let total_cols = n.div_ceil(rows.max(1));
-            scrollbar(app, ui, track, side, total_cols, ncols_vis, false);
+            scrollbar(app, ui, track, side, total_cols, ncols_vis, false, rows);
         }
     }
 }
 
-fn scrollbar(app: &mut App, ui: &mut Ui, track: Rect, side: Side, total: usize, visible: usize, vertical: bool) {
+/// Edge of a thumbnails-view cell (the name line comes on top of this).
+const THUMB_CELL: f32 = 128.0;
+
+#[allow(clippy::too_many_arguments)]
+fn draw_thumb_cell(app: &mut App, ui: &Ui, painter: &egui::Painter, r: Rect, e: &FileEntry, loc: &Location, is_cursor: bool, renaming: bool) {
+    let pal = app.pal.clone();
+    let inner = r.shrink(3.0);
+    if is_cursor {
+        painter.rect(inner, 3.0, pal.cursor_fill, Stroke::new(1.0, pal.cursor_border), StrokeKind::Inside);
+    } else if e.selected {
+        painter.rect_stroke(inner, 3.0, Stroke::new(1.5, pal.marked), StrokeKind::Inside);
+    }
+    let image_box = Rect::from_min_size(inner.min + vec2(6.0, 6.0), vec2(inner.width() - 12.0, THUMB_CELL - 18.0));
+    let full = loc.child_path(e);
+    let thumb = match (&full, e.is_parent) {
+        (Some(p), false) => app.thumbs.get(p, e.modified),
+        _ => None,
+    };
+    match thumb {
+        Some((tex, px)) => {
+            // Fit the image (physical pixels) into the box without upscaling.
+            let size = px / app.ppp.max(0.5);
+            let scale = (image_box.width() / size.x).min(image_box.height() / size.y).min(1.0);
+            let dst = Rect::from_center_size(image_box.center(), size * scale);
+            painter.image(tex, dst, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            // Still loading (or no preview): the small icon, centred.
+            let icon = Rect::from_center_size(image_box.center(), vec2(32.0, 32.0));
+            draw_icon(app, ui, icon, e, full.clone());
+        }
+    }
+    if renaming {
+        return;
+    }
+    let color = if e.selected { pal.marked } else if e.is_hidden() { pal.text_dim } else { pal.text };
+    let name_rect = Rect::from_min_max(pos2(inner.left() + 2.0, image_box.bottom() + 2.0), pos2(inner.right() - 2.0, inner.bottom()));
+    let galley = painter.layout_no_wrap(entry_name(app, e), font(app), color);
+    let x = if galley.size().x <= name_rect.width() { name_rect.center().x - galley.size().x / 2.0 } else { name_rect.left() };
+    painter.with_clip_rect(name_rect).galley(pos2(x, name_rect.center().y - galley.size().y / 2.0), galley, color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scrollbar(app: &mut App, ui: &mut Ui, track: Rect, side: Side, total: usize, visible: usize, vertical: bool, unit: usize) {
     let pal = app.pal.clone();
     ui.painter().rect_filled(track, 0.0, pal.scrollbar_track);
     if total <= visible || total == 0 {
         return;
     }
-    let rows = app.tab(side).page_rows.max(1);
-    let unit = if vertical { 1 } else { rows };
+    let unit = unit.max(1);
     let pos = app.tab(side).top / unit;
     let len = if vertical { track.height() } else { track.width() };
     let thumb_len = (len * visible as f32 / total as f32).max(20.0);

@@ -50,6 +50,7 @@ impl QuickSearchMode {
 pub enum ViewMode {
     Full,
     Brief,
+    Thumbs,
 }
 
 #[derive(Clone, Debug)]
@@ -231,7 +232,11 @@ impl Config {
                 tabs,
                 active_tab,
                 sort: ini.get(sec, "sort").map(sort_from_ini).unwrap_or_default(),
-                view: if ini.get_or(sec, "view", "full") == "brief" { ViewMode::Brief } else { ViewMode::Full },
+                view: match ini.get_or(sec, "view", "full") {
+                    "brief" => ViewMode::Brief,
+                    "thumbs" => ViewMode::Thumbs,
+                    _ => ViewMode::Full,
+                },
             }
         };
         let list = |sec: &str| -> Vec<String> {
@@ -351,7 +356,11 @@ impl Config {
             }
             ini.set(sec, "activetab", p.active_tab);
             ini.set(sec, "sort", sort_to_ini(p.sort));
-            ini.set(sec, "view", if p.view == ViewMode::Brief { "brief" } else { "full" });
+            ini.set(sec, "view", match p.view {
+                ViewMode::Brief => "brief",
+                ViewMode::Thumbs => "thumbs",
+                ViewMode::Full => "full",
+            });
         }
         for (i, h) in self.hotlist.iter().enumerate() {
             ini.set("Hotlist", &format!("name{}", i + 1), &h.name);
