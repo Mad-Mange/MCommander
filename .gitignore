@@ -1,0 +1,11 @@
+# Build output
+/target/
+*.pdb
+
+# Private, local-only material (not for the public repository)
+/inspiration/
+/AGENTS.md
+
+# Local test artifacts
+/scratch/
+*.mc_tmp
