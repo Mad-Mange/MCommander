@@ -483,7 +483,8 @@ fn info_line(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         (Location::Results { title, .. }, _) => title.clone(),
         (Location::Archive { archive, .. }, _) => {
             let size = std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
-            format!("[ZIP archive]  {} packed", format::human(size))
+            let kind = crate::archive::format_of(&archive.to_string_lossy()).unwrap_or(crate::archive::Format::Zip).label();
+            format!("[{kind} archive]  {} packed", format::human(size))
         }
         (_, Some(l)) => match app.drive_extra.get(&l) {
             Some(x) => {

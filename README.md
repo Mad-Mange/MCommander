@@ -26,12 +26,12 @@ If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd
 - **Two panels with folder tabs**: full and brief views, sortable and resizable columns, history, hotlist and drive buttons.
 - **The Total Commander keyboard layout**: F-keys, Num +/-/\*, Ctrl+Alt quick search (or letter-only, as in TC), Ctrl+Left/Right, Ctrl+U and the rest. Press <kbd>F1</kbd> in the app for the full list.
 - **Background file operations**: copy, move, delete (recycle bin or permanent) and rename on the fly with masks such as `*.bak`. They show progress, speed, cancel and an overwrite dialog (overwrite / skip / older / auto-rename, each with an "all" variant).
-- **ZIP archives open like folders**: browse with Enter, copy files in and out, delete inside, pack (Alt+F5), unpack (Alt+F9) and test.
+- **Archives open like folders**: ZIP, 7z, RAR and tar (plain, .gz, .xz, .bz2, .zst). Browse with Enter, copy files out, unpack (Alt+F9) and test. You can also pack (Alt+F5) to ZIP, 7z or tar.gz/xz/bz2. ZIP archives can additionally be edited in place: copy files in, delete inside. Everything runs in-process with exact Unicode names, without needing 7-Zip.
 - **Lister (F3)**: text with encoding detection, wrap and search, plus hex for any size and an image view. N/P step to the next or previous file.
 - **Find files (Alt+F7)**: name masks with exclusions, content search (UTF-8, UTF-16, ANSI, regex). Results can go to the file or be fed into a panel.
 - **Multi-Rename Tool (Ctrl+M)**: `[N]`, `[E]`, `[C]`, `[P]` and date placeholders, search and replace with regex, case conversion and a live preview.
 - **Synchronize directories**: recursive compare by size and date, with a direction you can change per file and a one-click sync.
-- **Windows integration**: Explorer's own context menu, shell icons, property sheets, file clipboard compatible with Explorer, drag & drop, and automatic refresh when folders change.
+- **Windows integration**: Explorer's own context menu, shell icons, property sheets, file clipboard compatible with Explorer, and drag & drop between panels, from Explorer, and out to Explorer and other apps. Folders refresh automatically when they change, and network shares and removable drives are read in the background, so a slow share never freezes the window.
 - **Light, dark or follow Windows**, including a dark title bar, switchable at runtime.
 
 <table>
@@ -109,7 +109,8 @@ MCommander is about 12,000 lines of Rust (tests included) in one binary crate:
 |---|---|
 | `app.rs`, `commands.rs` | Application state, input routing and the command dispatcher (the equivalent of TC's `cm_*` commands) |
 | `ui.rs`, `dialogs.rs`, `paint_icons.rs`, `theme.rs` | Custom-drawn panels with egui, modal dialogs, vector toolbar icons and the light/dark palettes |
-| `panel.rs`, `vfs.rs`, `archive.rs` | Tabs, cursor, selection and history; local, ZIP and search-result locations; sorting |
+| `panel.rs`, `vfs.rs` | Tabs, cursor, selection and history; local, archive and search-result locations; sorting |
+| `archive.rs` | ZIP (read/write), 7z, tar.* (read/create) and RAR (read) behind one entry iterator |
 | `ops.rs` | Copy/move/delete/pack jobs on worker threads (`CopyFileExW` with progress and cancel) |
 | `viewer.rs`, `search.rs`, `rename.rs`, `sync.rs`, `tree.rs` | Lister, Find Files, Multi-Rename, Synchronize, CD tree |
 | `win.rs`, `icons.rs`, `watch.rs` | Win32: drives, shell execution, recycle bin, clipboard, context menu, icons, keyboard hook, change notifications |
@@ -128,7 +129,7 @@ The app accepts `--keys=` scripts for end-to-end UI checks. The steps are comma 
 
 ## Not (yet) included
 
-Coming from Total Commander, you will miss FTP/SFTP, plugins (WCX/WFX/WLX/WDX), thumbnails view, custom columns, a configurable button bar, RAR/7z support and multi-file property sheets. Pull requests are welcome.
+Coming from Total Commander, you will miss FTP/SFTP, plugins (WCX/WFX/WLX/WDX), thumbnails view, custom columns, a configurable button bar, multi-file property sheets, and updating 7z/tar archives in place (they are read-only; only ZIP can be modified). RAR archives can be read but not created. Pull requests are welcome.
 
 ## About this project
 

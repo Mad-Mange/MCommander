@@ -9,6 +9,21 @@ use crate::theme::Palette;
 use egui::{Align, Context, Key, Layout, RichText, Ui};
 use std::path::PathBuf;
 
+/// Archive formats offered by the pack dialog.
+const PACK_FORMATS: [&str; 6] = [".zip", ".7z", ".tar", ".tar.gz", ".tar.xz", ".tar.bz2"];
+
+/// The archive extension at the end of `name` (".tar.gz" before ".gz"), or "".
+fn archive_suffix(name: &str) -> &str {
+    let lower = name.to_ascii_lowercase();
+    let mut best = "";
+    for ext in PACK_FORMATS {
+        if lower.ends_with(ext) && ext.len() > best.len() {
+            best = ext;
+        }
+    }
+    &name[name.len() - best.len()..]
+}
+
 pub enum ConfirmAction {
     Delete(Vec<Source>, bool),
 }
@@ -248,11 +263,23 @@ pub fn draw(app: &mut App, ctx: &Context) {
                 // Select the archive name without ".zip".
                 let n = target.chars().count();
                 let start = target.rfind('\\').map(|i| target[..=i].chars().count()).unwrap_or(0);
-                let end = if target.to_lowercase().ends_with(".zip") { n - 4 } else { n };
+                let end = n - archive_suffix(target).chars().count();
                 focus_select_modal(ui, id, first, start, end);
                 ui.add(egui::TextEdit::singleline(target).id(id).desired_width(f32::INFINITY));
+                // Format choice rewrites the extension (like TC's packer radio buttons).
+                ui.horizontal(|ui| {
+                    ui.label("Packer:");
+                    let current = archive_suffix(target).to_ascii_lowercase();
+                    for ext in PACK_FORMATS {
+                        if ui.radio(current == *ext, ext.trim_start_matches('.').to_uppercase()).clicked() {
+                            let stem_len = target.len() - archive_suffix(target).len();
+                            target.truncate(stem_len);
+                            target.push_str(ext);
+                        }
+                    }
+                });
                 ui.checkbox(move_files, "Move to archive (delete originals)");
-                ui.label(RichText::new("Format: ZIP (Deflate). Existing archives are updated.").weak().small());
+                ui.label(RichText::new("Existing ZIP archives are updated; 7z and TAR archives are created new.").weak().small());
                 let b = buttons(ui, &["OK", "Cancel"]);
                 if enter(ui) { Some(0) } else { b }
             });
@@ -726,7 +753,10 @@ fn options_ui(ui: &mut Ui, cfg: &mut Config) -> Option<usize> {
 // ---- job progress -----------------------------------------------------------------------
 
 fn bar(ui: &mut Ui, frac: f32, text: String) {
-    ui.add(egui::ProgressBar::new(frac.clamp(0.0, 1.0)).text(text).desired_width(f32::INFINITY));
+    // ProgressBar takes its width literally (unlike TextEdit): an infinite
+    // width turns into NaN layout during a modal's sizing pass.
+    let frac = if frac.is_finite() { frac.clamp(0.0, 1.0) } else { 0.0 };
+    ui.add(egui::ProgressBar::new(frac).text(text).desired_width(ui.available_width().min(2000.0)));
 }
 
 fn draw_job(app: &mut App, ctx: &Context) {

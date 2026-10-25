@@ -5,7 +5,7 @@ use crate::config::{Config, QuickSearchMode, ThemeMode, ViewMode};
 use crate::dialogs::{ConfirmAction, Dialog, InputKind};
 use crate::icons::IconCache;
 use crate::ops::{Dest, Job, OpKind, OpRequest, Source};
-use crate::panel::{FileFilter, Panel, Side, Tab, ZipCache};
+use crate::panel::{FileFilter, Panel, Side, Tab, ArchiveCache};
 use crate::theme::Palette;
 use crate::vfs::{self, FileEntry, ListOptions, Location, SortColumn, SortSpec};
 use crate::watch::DirWatcher;
@@ -102,7 +102,7 @@ pub struct App {
     pub pal: Palette,
     pub panels: [Panel; 2],
     pub active: Side,
-    pub zips: ZipCache,
+    pub zips: ArchiveCache,
     pub icons: IconCache,
     pub cmdline: String,
     /// The command line has the keyboard (letter quick-search modes).
@@ -185,7 +185,7 @@ impl App {
             pal: Palette::light(),
             panels,
             active: if cfg.active_right { Side::Right } else { Side::Left },
-            zips: ZipCache::default(),
+            zips: ArchiveCache::default(),
             icons: IconCache::new(ctx.clone()),
             cmdline: String::new(),
             cmd_active: false,
@@ -512,19 +512,11 @@ impl App {
         let Location::Archive { archive, .. } = &tab.loc else { return None };
         let inner = tab.loc.inner_path(&entry.name)?;
         let idx = tab.zip.clone()?;
-        let item = idx.items.iter().find(|i| i.path == inner && !i.is_dir)?.clone();
         let tmp = std::env::temp_dir()
             .join("MCommander")
             .join(format!("{:x}", fxhash(&format!("{}|{}", archive.display(), inner))));
         let target = tmp.join(&entry.name);
-        let result = (|| -> std::io::Result<()> {
-            std::fs::create_dir_all(&tmp)?;
-            let mut zip = crate::archive::open_archive(archive)?;
-            let mut f = zip.by_index(item.index).map_err(std::io::Error::other)?;
-            let mut out = std::fs::File::create(&target)?;
-            std::io::copy(&mut f, &mut out)?;
-            Ok(())
-        })();
+        let result = std::fs::create_dir_all(&tmp).and_then(|_| crate::archive::extract_one(&idx, &inner, &target));
         match result {
             Ok(()) => Some(target),
             Err(e) => {
@@ -545,7 +537,7 @@ impl App {
                 match &tab.loc {
                     _ if e.full_path.is_some() => Some(Source::Fs(e.full_path.clone().unwrap())),
                     Location::Fs(d) => Some(Source::Fs(d.join(&e.name))),
-                    Location::Archive { archive, .. } => Some(Source::Zip {
+                    Location::Archive { archive, .. } => Some(Source::Archive {
                         archive: archive.clone(),
                         inner: tab.loc.inner_path(&e.name)?,
                         is_dir: e.is_dir,
@@ -1683,7 +1675,7 @@ impl App {
                 other => other.display(),
             }
         };
-        let is_dir_single = sources.len() == 1 && matches!(&sources[0], Source::Fs(p) if p.is_dir()) || matches!(&sources[0], Source::Zip { is_dir: true, .. }) && sources.len() == 1;
+        let is_dir_single = sources.len() == 1 && matches!(&sources[0], Source::Fs(p) if p.is_dir()) || matches!(&sources[0], Source::Archive { is_dir: true, .. }) && sources.len() == 1;
         let target = match &single {
             Some(name) if same_dir || !is_dir_single => format!("{target_base}{name}"),
             _ => format!("{target_base}*.*"),
@@ -1757,7 +1749,7 @@ impl App {
         if sources.is_empty() {
             return;
         }
-        let in_archive = sources.iter().any(|s| matches!(s, Source::Zip { .. }));
+        let in_archive = sources.iter().any(|s| matches!(s, Source::Archive { .. }));
         // Network shares have no recycle bin: Windows would delete permanently.
         let network = sources.iter().any(|s| match s {
             Source::Fs(p) => {
@@ -1765,7 +1757,7 @@ impl App {
                 let letter = text.chars().next().filter(|_| text.as_bytes().get(1) == Some(&b':')).map(|c| c.to_ascii_uppercase());
                 text.starts_with("\\\\") || letter.is_some_and(|l| self.drives.iter().any(|d| d.letter == l && d.kind == win::DriveKind::Network))
             }
-            Source::Zip { .. } => false,
+            Source::Archive { .. } => false,
         });
         let recycle = self.cfg.use_recycle_bin && !permanent && !in_archive && !network;
         if !self.cfg.confirm_delete && !(network && self.cfg.use_recycle_bin && !permanent) {
@@ -1841,7 +1833,7 @@ impl App {
             };
             self.start_job(OpRequest {
                 kind: OpKind::Copy,
-                sources: vec![Source::Zip { archive: a, inner: String::new(), is_dir: true }],
+                sources: vec![Source::Archive { archive: a, inner: String::new(), is_dir: true }],
                 dest: Some(Dest::Dir(dest)),
                 mask: "*.*".into(),
             });
@@ -1863,15 +1855,7 @@ impl App {
         std::thread::spawn(move || {
             let mut report = Vec::new();
             for a in archives {
-                let res = (|| -> Result<usize, String> {
-                    let mut z = crate::archive::open_archive(&a).map_err(|e| e.to_string())?;
-                    let mut sink = std::io::sink();
-                    for i in 0..z.len() {
-                        let mut f = z.by_index(i).map_err(|e| e.to_string())?;
-                        std::io::copy(&mut f, &mut sink).map_err(|e| format!("{}: {e}", f.name().unwrap_or_default()))?;
-                    }
-                    Ok(z.len())
-                })();
+                let res = crate::archive::test_archive(&a).map_err(|e| e.to_string());
                 let name = a.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 report.push(match res {
                     Ok(n) => format!("OK     {name} ({n} entries)"),

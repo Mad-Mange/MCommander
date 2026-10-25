@@ -1,7 +1,7 @@
 //! Virtual file system: local directories, the inside of ZIP archives and
 //! search result lists ("feed to listbox"), presented as one kind of listing.
 
-use crate::archive::ZipIndex;
+use crate::archive::ArchiveIndex;
 use crate::format::{self, ATTR_DIRECTORY, ATTR_HIDDEN, ATTR_REPARSE, ATTR_SYSTEM};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -367,7 +367,7 @@ pub fn list_fs(dir: &Path, opts: ListOptions) -> std::io::Result<Vec<FileEntry>>
 }
 
 /// Lists an archive directory from a cached index.
-pub fn list_archive(index: &ZipIndex, inner: &str) -> Vec<FileEntry> {
+pub fn list_archive(index: &ArchiveIndex, inner: &str) -> Vec<FileEntry> {
     let mut out = vec![FileEntry::parent_entry(index.modified, ATTR_DIRECTORY)];
     out.extend(index.children(inner));
     out

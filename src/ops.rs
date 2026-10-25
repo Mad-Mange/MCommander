@@ -3,10 +3,10 @@
 //! A job runs on its own thread. The UI polls [`Job::progress`] every frame
 //! and answers overwrite prompts through [`Job::decide`].
 
-use crate::archive::{self, AddItem, ZipIndex};
+use crate::archive::{self, AddItem, ArchiveIndex};
 use crate::mask::apply_rename_mask;
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -15,14 +15,14 @@ use std::time::{Instant, SystemTime};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Fs(PathBuf),
-    Zip { archive: PathBuf, inner: String, is_dir: bool },
+    Archive { archive: PathBuf, inner: String, is_dir: bool },
 }
 
 impl Source {
     pub fn name(&self) -> String {
         match self {
             Source::Fs(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            Source::Zip { inner, .. } => inner.rsplit('/').next().unwrap_or(inner).to_string(),
+            Source::Archive { inner, .. } => inner.rsplit('/').next().unwrap_or(inner).to_string(),
         }
     }
 }
@@ -326,15 +326,15 @@ impl Worker {
         let dest = req.dest.clone().ok_or("No target")?;
         let fs_sources: Vec<PathBuf> =
             req.sources.iter().filter_map(|s| if let Source::Fs(p) = s { Some(p.clone()) } else { None }).collect();
-        let zip_sources: Vec<&Source> = req.sources.iter().filter(|s| matches!(s, Source::Zip { .. })).collect();
+        let zip_sources: Vec<&Source> = req.sources.iter().filter(|s| matches!(s, Source::Archive { .. })).collect();
 
         // Totals for the progress bars.
         let (mut files, mut bytes) = self.count_fs(&fs_sources);
         let mut zip_index = None;
-        if let Some(Source::Zip { archive, .. }) = zip_sources.first() {
-            let idx = ZipIndex::open(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+        if let Some(Source::Archive { archive, .. }) = zip_sources.first() {
+            let idx = ArchiveIndex::open(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
             let paths: Vec<String> =
-                zip_sources.iter().filter_map(|s| if let Source::Zip { inner, .. } = s { Some(inner.clone()) } else { None }).collect();
+                zip_sources.iter().filter_map(|s| if let Source::Archive { inner, .. } = s { Some(inner.clone()) } else { None }).collect();
             for it in idx.files_under(&paths) {
                 files += 1;
                 bytes += it.size;
@@ -368,7 +368,7 @@ impl Worker {
                     if is_move && !self.cancelled() {
                         let removed: HashSet<String> = zip_sources
                             .iter()
-                            .filter_map(|s| if let Source::Zip { inner, .. } = s { Some(inner.clone()) } else { None })
+                            .filter_map(|s| if let Source::Archive { inner, .. } = s { Some(inner.clone()) } else { None })
                             .collect();
                         self.delete_from_zip(&idx.path, &removed)?;
                     }
@@ -556,50 +556,62 @@ impl Worker {
 
     // ---- archives --------------------------------------------------------
 
-    fn extract(&mut self, idx: &ZipIndex, sources: &[&Source], dest: &Path, mask: &str) -> R<()> {
-        let mut zip = archive::open_archive(&idx.path).map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; 256 * 1024];
-        for src in sources {
-            let Source::Zip { inner, is_dir, .. } = src else { continue };
-            let base = match inner.rfind('/') {
-                Some(i) => &inner[..i + 1],
-                None => "",
-            };
-            let mut items: Vec<&archive::ZipItem> = idx
-                .items
-                .iter()
-                .filter(|it| it.path == *inner || it.path.starts_with(&format!("{inner}/")))
-                .collect();
-            items.sort_by(|a, b| a.path.cmp(&b.path));
-            if *is_dir {
-                if let Some(t) = archive::safe_join(dest, &inner[base.len()..]) {
+    fn extract(&mut self, idx: &ArchiveIndex, sources: &[&Source], dest: &Path, mask: &str) -> R<()> {
+        // Each selected item with the length of its parent prefix: extracted
+        // paths are relative to the folder shown in the panel.
+        struct Sel {
+            inner: String,
+            base: usize,
+            is_dir: bool,
+        }
+        let sels: Vec<Sel> = sources
+            .iter()
+            .filter_map(|s| match s {
+                Source::Archive { inner, is_dir, .. } => {
+                    Some(Sel { base: inner.rfind('/').map(|i| i + 1).unwrap_or(0), inner: inner.clone(), is_dir: *is_dir })
+                }
+                Source::Fs(_) => None,
+            })
+            .collect();
+        // Directories first, so empty ones are restored as well.
+        for sel in sels.iter().filter(|s| s.is_dir) {
+            let mut dirs: Vec<&str> = idx.items.iter().filter(|it| it.is_dir && archive::within(&it.path, &sel.inner)).map(|it| it.path.as_str()).collect();
+            if !sel.inner.is_empty() {
+                dirs.push(&sel.inner);
+            }
+            for d in dirs {
+                if let Some(t) = archive::safe_join(dest, &d[sel.base..]) {
                     let _ = std::fs::create_dir_all(t);
                 }
             }
-            for it in items {
-                if self.cancelled() {
-                    return Err(CANCELLED.into());
-                }
-                let mut rel = it.path[base.len()..].to_string();
-                if !is_dir {
+        }
+        let shared = self.sh.clone();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut cancelled = false;
+        let result = archive::for_each_entry(
+            idx,
+            &|p| sels.iter().any(|s| archive::within(p, &s.inner)),
+            &mut |it, data| {
+                let Some(sel) = sels.iter().find(|s| archive::within(&it.path, &s.inner)) else { return Ok(true) };
+                let mut rel = it.path[sel.base..].to_string();
+                if !sel.is_dir {
                     rel = apply_rename_mask(mask, &rel);
                 }
                 let Some(mut target) = archive::safe_join(dest, &rel) else {
                     self.error(format!("Unsafe path in archive skipped: {}", it.path));
-                    continue;
+                    return Ok(true);
                 };
-                if it.is_dir {
-                    let _ = std::fs::create_dir_all(&target);
-                    continue;
-                }
                 match self.resolve(&target, it.size, it.modified) {
                     Resolution::Write => clear_readonly(&target),
                     Resolution::Skip => {
                         self.skip_file(it.size);
-                        continue;
+                        return Ok(true);
                     }
                     Resolution::RenameTo(p) => target = p,
-                    Resolution::Cancel => return Err(CANCELLED.into()),
+                    Resolution::Cancel => {
+                        cancelled = true;
+                        return Ok(false);
+                    }
                 }
                 if let Some(parent) = target.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -611,11 +623,10 @@ impl Worker {
                     p.cur_total = it.size;
                 });
                 let res = (|| -> std::io::Result<()> {
-                    let mut entry = zip.by_index(it.index).map_err(std::io::Error::other)?;
                     let mut out = std::fs::File::create(&target)?;
                     let mut done = 0u64;
                     loop {
-                        let n = entry.read(&mut buf)?;
+                        let n = data.read(&mut buf)?;
                         if n == 0 {
                             break;
                         }
@@ -638,18 +649,58 @@ impl Worker {
                     Ok(()) => self.update(|p| p.files_done += 1),
                     Err(_) if self.cancelled() => {
                         let _ = std::fs::remove_file(&target);
-                        return Err(CANCELLED.into());
+                        cancelled = true;
+                        return Ok(false);
                     }
                     Err(e) => self.error(format!("{}: {e}", it.path)),
                 }
-            }
-            let name = src.name();
-            self.update(|p| p.done_sources.push(name));
+                Ok(true)
+            },
+            &shared.cancel,
+        );
+        if cancelled || self.cancelled() {
+            return Err(CANCELLED.into());
         }
+        result.map_err(|e| format!("{}: {e}", idx.path.display()))?;
+        let names: Vec<String> = sources.iter().map(|s| s.name()).collect();
+        self.update(|p| p.done_sources.extend(names));
         Ok(())
     }
 
+    /// Progress callback for archive writers: counts files and bytes.
+    fn archive_progress(&self) -> impl FnMut(&str, u64) -> bool + use<> {
+        let sh = self.sh.clone();
+        let ctx = self.ctx.clone();
+        let mut last = String::new();
+        move |name, n| {
+            let mut p = sh.progress.lock().unwrap();
+            if name != last {
+                last = name.to_string();
+                p.current = name.to_string();
+                p.files_done += 1;
+            }
+            p.bytes_done += n;
+            drop(p);
+            ctx.request_repaint();
+            true
+        }
+    }
+
+    fn require_writable(archive_path: &Path) -> R<()> {
+        let format = archive::format_of(&archive_path.to_string_lossy()).unwrap_or(archive::Format::Zip);
+        if format.writable() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}: {} archives can only be read. Files can be added to and deleted from ZIP archives.",
+                archive_path.display(),
+                format.label()
+            ))
+        }
+    }
+
     fn add_to_zip(&mut self, archive_path: &Path, inner: &str, sources: &[PathBuf], mask: &str) -> R<()> {
+        Self::require_writable(archive_path)?;
         let mut add = archive::expand_sources(sources, inner);
         if mask != "*.*" && !mask.is_empty() {
             // The mask renames top-level files only.
@@ -660,7 +711,7 @@ impl Worker {
             }
         }
         if archive_path.exists() {
-            let idx = ZipIndex::open(archive_path).map_err(|e| e.to_string())?;
+            let idx = ArchiveIndex::open(archive_path).map_err(|e| e.to_string())?;
             let existing: HashSet<&str> = idx.items.iter().filter(|i| !i.is_dir).map(|i| i.path.as_str()).collect();
             let mut keep = Vec::new();
             for item in add {
@@ -686,29 +737,9 @@ impl Worker {
             p.bytes_total = total;
             p.target = archive_path.to_string_lossy().into_owned();
         });
-        let cancel = &self.sh.cancel;
-        let sh = self.sh.clone();
-        let ctx = self.ctx.clone();
-        let mut last = String::new();
-        archive::rebuild(
-            archive_path,
-            &|_| true,
-            &add,
-            &mut |name, n| {
-                let mut p = sh.progress.lock().unwrap();
-                if name != last {
-                    last = name.to_string();
-                    p.current = name.to_string();
-                    p.files_done += 1;
-                }
-                p.bytes_done += n;
-                drop(p);
-                ctx.request_repaint();
-                true
-            },
-            cancel,
-        )
-        .map_err(|e| if self.cancelled() { CANCELLED.to_string() } else { format!("{}: {e}", archive_path.display()) })
+        let mut progress = self.archive_progress();
+        archive::rebuild(archive_path, &|_| true, &add, &mut progress, &self.sh.cancel)
+            .map_err(|e| if self.cancelled() { CANCELLED.to_string() } else { format!("{}: {e}", archive_path.display()) })
     }
 
     /// Like [`Worker::resolve`] but for a member that only exists inside an archive.
@@ -761,6 +792,7 @@ impl Worker {
     }
 
     fn delete_from_zip(&mut self, archive_path: &Path, removed: &HashSet<String>) -> R<()> {
+        Self::require_writable(archive_path)?;
         self.update(|p| p.current = archive_path.to_string_lossy().into_owned());
         let keep = |name: &str| !removed.iter().any(|r| name == r || name.starts_with(&format!("{r}/")));
         archive::rebuild(archive_path, &keep, &[], &mut |_, _| true, &self.sh.cancel)
@@ -775,7 +807,20 @@ impl Worker {
             p.files_total = files;
             p.bytes_total = bytes;
         });
-        self.add_to_zip(archive_path, "", &fs, "*.*")?;
+        let format = archive::format_of(&archive_path.to_string_lossy()).unwrap_or(archive::Format::Zip);
+        if format.writable() {
+            self.add_to_zip(archive_path, "", &fs, "*.*")?;
+        } else {
+            // 7z and tar archives are written in one go.
+            if archive_path.exists() {
+                return Err(format!("{} already exists and {} archives cannot be updated; choose a new name.", archive_path.display(), format.label()));
+            }
+            self.update(|p| p.target = archive_path.to_string_lossy().into_owned());
+            let add = archive::expand_sources(&fs, "");
+            let mut progress = self.archive_progress();
+            archive::create(archive_path, &add, &mut progress, &self.sh.cancel)
+                .map_err(|e| if self.cancelled() { CANCELLED.to_string() } else { format!("{}: {e}", archive_path.display()) })?;
+        }
         if move_files && !self.cancelled() && self.sh.progress.lock().unwrap().errors.is_empty() {
             for s in &fs {
                 self.remove_fs(s)?;
@@ -814,9 +859,9 @@ impl Worker {
     fn run_delete(&mut self, sources: &[Source], recycle: bool) -> R<()> {
         let fs: Vec<PathBuf> = sources.iter().filter_map(|s| if let Source::Fs(p) = s { Some(p.clone()) } else { None }).collect();
         let zip: HashSet<String> =
-            sources.iter().filter_map(|s| if let Source::Zip { inner, .. } = s { Some(inner.clone()) } else { None }).collect();
+            sources.iter().filter_map(|s| if let Source::Archive { inner, .. } = s { Some(inner.clone()) } else { None }).collect();
         if !zip.is_empty() {
-            let Some(Source::Zip { archive, .. }) = sources.iter().find(|s| matches!(s, Source::Zip { .. })) else {
+            let Some(Source::Archive { archive, .. }) = sources.iter().find(|s| matches!(s, Source::Archive { .. })) else {
                 return Ok(());
             };
             self.update(|p| {
@@ -1140,7 +1185,7 @@ mod tests {
         let out = dir.path().join("out");
         let p = run(OpRequest {
             kind: OpKind::Copy,
-            sources: vec![Source::Zip { archive: zip.clone(), inner: "data/inner".into(), is_dir: true }],
+            sources: vec![Source::Archive { archive: zip.clone(), inner: "data/inner".into(), is_dir: true }],
             dest: Some(Dest::Dir(out.clone())),
             mask: "*.*".into(),
         });
@@ -1149,12 +1194,12 @@ mod tests {
 
         let p = run(OpRequest {
             kind: OpKind::Delete { recycle: false },
-            sources: vec![Source::Zip { archive: zip.clone(), inner: "data/one.txt".into(), is_dir: false }],
+            sources: vec![Source::Archive { archive: zip.clone(), inner: "data/one.txt".into(), is_dir: false }],
             dest: None,
             mask: String::new(),
         });
         assert!(p.errors.is_empty());
-        let idx = ZipIndex::open(&zip).unwrap();
+        let idx = ArchiveIndex::open(&zip).unwrap();
         assert!(idx.items.iter().all(|i| i.path != "data/one.txt"));
         assert!(idx.items.iter().any(|i| i.path == "data/inner/two.txt"));
 
@@ -1167,8 +1212,57 @@ mod tests {
             mask: "*.*".into(),
         });
         assert!(p.errors.is_empty(), "{:?}", p.errors);
-        let idx = ZipIndex::open(&zip).unwrap();
+        let idx = ArchiveIndex::open(&zip).unwrap();
         assert!(idx.items.iter().any(|i| i.path == "data/new.md"));
+    }
+
+    #[test]
+    fn extracts_from_7z_and_refuses_to_modify_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("data");
+        std::fs::create_dir_all(src.join("inner").join("empty")).unwrap();
+        std::fs::write(src.join("one.txt"), b"1").unwrap();
+        std::fs::write(src.join("inner").join("two.txt"), b"22").unwrap();
+        let arc = dir.path().join("pack.7z");
+        let p = run(OpRequest {
+            kind: OpKind::Pack { archive: arc.clone(), move_files: false },
+            sources: vec![Source::Fs(src.clone())],
+            dest: None,
+            mask: "*.*".into(),
+        });
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+
+        // A folder from inside the archive.
+        let out = dir.path().join("out");
+        let p = run(OpRequest {
+            kind: OpKind::Copy,
+            sources: vec![Source::Archive { archive: arc.clone(), inner: "data/inner".into(), is_dir: true }],
+            dest: Some(Dest::Dir(out.clone())),
+            mask: "*.*".into(),
+        });
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(std::fs::read(out.join("inner").join("two.txt")).unwrap(), b"22");
+        assert!(out.join("inner").join("empty").is_dir());
+
+        // The whole archive (Alt+F9).
+        let all = dir.path().join("all");
+        let p = run(OpRequest {
+            kind: OpKind::Copy,
+            sources: vec![Source::Archive { archive: arc.clone(), inner: String::new(), is_dir: true }],
+            dest: Some(Dest::Dir(all.clone())),
+            mask: "*.*".into(),
+        });
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(std::fs::read(all.join("data").join("one.txt")).unwrap(), b"1");
+
+        // 7z is read-only: deleting inside reports a clear error.
+        let p = run(OpRequest {
+            kind: OpKind::Delete { recycle: false },
+            sources: vec![Source::Archive { archive: arc.clone(), inner: "data/one.txt".into(), is_dir: false }],
+            dest: None,
+            mask: String::new(),
+        });
+        assert!(p.errors.iter().any(|e| e.contains("can only be read")), "{:?}", p.errors);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! File panel model: tabs, listing, cursor, selection, history and filters.
 
-use crate::archive::ZipIndex;
+use crate::archive::ArchiveIndex;
 use crate::config::ViewMode;
 use crate::mask::MaskSet;
 use crate::vfs::{self, FileEntry, ListOptions, Location, SortSpec};
@@ -38,19 +38,19 @@ pub enum FileFilter {
 
 /// Caches opened ZIP indexes by path and modification time.
 #[derive(Default)]
-pub struct ZipCache {
-    map: HashMap<PathBuf, (Option<SystemTime>, Arc<ZipIndex>)>,
+pub struct ArchiveCache {
+    map: HashMap<PathBuf, (Option<SystemTime>, Arc<ArchiveIndex>)>,
 }
 
-impl ZipCache {
-    pub fn get(&mut self, path: &std::path::Path) -> Result<Arc<ZipIndex>, String> {
+impl ArchiveCache {
+    pub fn get(&mut self, path: &std::path::Path) -> Result<Arc<ArchiveIndex>, String> {
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         if let Some((t, idx)) = self.map.get(path) {
             if *t == mtime {
                 return Ok(idx.clone());
             }
         }
-        let idx = Arc::new(ZipIndex::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
+        let idx = Arc::new(ArchiveIndex::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
         self.map.insert(path.to_path_buf(), (mtime, idx.clone()));
         Ok(idx)
     }
@@ -67,7 +67,7 @@ pub struct Stats {
 }
 
 /// Result of reading a location: entries plus the archive index, if any.
-pub type Listing = Result<(Vec<FileEntry>, Option<Arc<ZipIndex>>), String>;
+pub type Listing = Result<(Vec<FileEntry>, Option<Arc<ArchiveIndex>>), String>;
 
 static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -100,7 +100,7 @@ pub struct Tab {
     pub hist_pos: usize,
     pub error: Option<String>,
     pub saved_selection: Vec<String>,
-    pub zip: Option<Arc<ZipIndex>>,
+    pub zip: Option<Arc<ArchiveIndex>>,
     /// Anchor for Shift+click range selection.
     pub anchor: Option<usize>,
     /// Scroll so the cursor is visible on the next draw.
@@ -138,7 +138,7 @@ impl Tab {
         }
     }
 
-    fn read(&self, loc: &Location, branch: bool, opts: ListOptions, zips: &mut ZipCache) -> Listing {
+    fn read(&self, loc: &Location, branch: bool, opts: ListOptions, zips: &mut ArchiveCache) -> Listing {
         match loc {
             Location::Fs(p) => read_fs(p, branch, opts),
             Location::Archive { archive, inner } => {
@@ -171,7 +171,7 @@ impl Tab {
     }
 
     /// Changes to a new location. On failure the tab stays where it was.
-    pub fn go(&mut self, loc: Location, focus: Option<&str>, opts: ListOptions, zips: &mut ZipCache) -> Result<(), String> {
+    pub fn go(&mut self, loc: Location, focus: Option<&str>, opts: ListOptions, zips: &mut ArchiveCache) -> Result<(), String> {
         let branch = self.branch && loc == self.loc;
         let listing = self.read(&loc, branch, opts, zips);
         self.loading = None;
@@ -212,13 +212,13 @@ impl Tab {
     }
 
     /// Re-reads the current location, keeping cursor, selection and computed sizes.
-    pub fn refresh(&mut self, opts: ListOptions, zips: &mut ZipCache) {
+    pub fn refresh(&mut self, opts: ListOptions, zips: &mut ArchiveCache) {
         let listing = self.read(&self.loc.clone(), self.branch, opts, zips);
         self.finish_refresh(listing, opts, zips);
     }
 
     /// Applies a re-read of the current location.
-    pub fn finish_refresh(&mut self, listing: Listing, opts: ListOptions, zips: &mut ZipCache) {
+    pub fn finish_refresh(&mut self, listing: Listing, opts: ListOptions, zips: &mut ArchiveCache) {
         let cursor_name = self.cursor_entry().map(|e| e.name.clone());
         let selected: HashSet<String> = self.entries.iter().filter(|e| e.selected).map(|e| key_of(e)).collect();
         let sizes: HashMap<String, u64> =
@@ -423,7 +423,7 @@ impl Tab {
     }
 
     /// Moves through history without adding entries.
-    pub fn history_jump(&mut self, pos: usize, opts: ListOptions, zips: &mut ZipCache) -> Result<(), String> {
+    pub fn history_jump(&mut self, pos: usize, opts: ListOptions, zips: &mut ArchiveCache) -> Result<(), String> {
         let Some(loc) = self.history.get(pos).cloned() else { return Ok(()) };
         let hist = self.history.clone();
         // Focus the directory we came from when it is a child of the target.
@@ -478,13 +478,13 @@ impl Panel {
 mod tests {
     use super::*;
 
-    fn tab_with_files() -> (tempfile::TempDir, Tab, ZipCache) {
+    fn tab_with_files() -> (tempfile::TempDir, Tab, ArchiveCache) {
         let dir = tempfile::tempdir().unwrap();
         for n in ["b.txt", "a.rs", "c.TXT", "d.md"] {
             std::fs::write(dir.path().join(n), n.as_bytes()).unwrap();
         }
         std::fs::create_dir(dir.path().join("zdir")).unwrap();
-        let mut zips = ZipCache::default();
+        let mut zips = ArchiveCache::default();
         let mut tab = Tab::new(Location::fs(dir.path()), SortSpec::default(), ViewMode::Full);
         tab.go(Location::fs(dir.path()), None, ListOptions::default(), &mut zips).unwrap();
         (dir, tab, zips)
