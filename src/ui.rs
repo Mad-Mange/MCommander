@@ -455,7 +455,7 @@ fn info_line(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         (Location::Results { title, .. }, _) => title.clone(),
         (Location::Archive { archive, .. }, _) => {
             let size = std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
-            format!("[archive]  {} k packed", format::thousands(size / 1024))
+            format!("[ZIP archive]  {} packed", format::human(size))
         }
         (_, Some(l)) => match app.drive_extra.get(&l) {
             Some(x) => {
@@ -893,17 +893,12 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
                 }
             };
             let id = egui::Id::unique("inline-rename");
-            if r.init {
+            if std::mem::take(&mut r.init) {
+                // Select the name without its extension, like TC.
                 let stem = crate::format::split_ext(&r.text, false).0.chars().count();
-                let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(stem))));
-                state.store(ui.ctx(), id);
+                crate::dialogs::focus_select(ui, id, 0, stem);
             }
             let resp = ui.put(row_rect, egui::TextEdit::singleline(&mut r.text).id(id).font(fnt.clone()).margin(egui::Margin::symmetric(2, 0)));
-            if r.init {
-                resp.request_focus();
-                r.init = false;
-            }
             if resp.lost_focus() {
                 let esc = ui.input(|i| i.key_pressed(Key::Escape));
                 app.finish_rename(!esc);

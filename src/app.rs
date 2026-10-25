@@ -1687,6 +1687,7 @@ impl App {
             sources,
             target: base.join(name).to_string_lossy().into_owned(),
             move_files: false,
+            init: true,
         });
     }
 
@@ -1709,7 +1710,7 @@ impl App {
             Some(p) => p.to_path_buf(),
             None => tab.loc.host_dir().unwrap_or_default(),
         };
-        self.dialog = Some(Dialog::Unpack { archives, target: vfs::Location::fs(target).display(), separate: false });
+        self.dialog = Some(Dialog::Unpack { archives, target: vfs::Location::fs(target).display(), separate: false, init: true });
     }
 
     pub fn start_unpack(&mut self, archives: Vec<PathBuf>, target: &str, separate: bool) {

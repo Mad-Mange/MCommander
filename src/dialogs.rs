@@ -35,8 +35,8 @@ pub enum Dialog {
     Confirm { title: String, text: String, action: ConfirmAction },
     Input { kind: InputKind, prompt: String, text: String, history: Vec<String>, init: bool },
     Transfer { mv: bool, sources: Vec<Source>, label: String, target: String, src_dir: Option<PathBuf>, init: bool },
-    Pack { label: String, sources: Vec<Source>, target: String, move_files: bool },
-    Unpack { archives: Vec<PathBuf>, target: String, separate: bool },
+    Pack { label: String, sources: Vec<Source>, target: String, move_files: bool, init: bool },
+    Unpack { archives: Vec<PathBuf>, target: String, separate: bool, init: bool },
     Attributes(AttrState),
     Occupied { what: String, result: Option<(u64, u64, u64)> },
     Hotlist { entries: Vec<HotlistEntry>, sel: usize },
@@ -111,21 +111,31 @@ fn enter(ui: &Ui) -> bool {
     ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.any())
 }
 
-fn text_field(ui: &mut Ui, text: &mut String, id: &str, focus: bool, select_all: bool) -> egui::Response {
+/// Focuses a text field and selects the char range `from..to` *before* it is
+/// drawn: egui collapses the selection of fields that do not have focus.
+pub fn focus_select(ui: &Ui, id: egui::Id, from: usize, to: usize) {
+    ui.memory_mut(|m| m.request_focus(id));
+    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(from), egui::text::CCursor::new(to))));
+    state.store(ui.ctx(), id);
+}
+
+/// Like [`focus_select`] for the main field of a modal dialog: applied on the
+/// first two frames, because a modal's first frame is an invisible sizing
+/// pass that drops keyboard focus.
+pub fn focus_select_modal(ui: &Ui, id: egui::Id, first: bool, from: usize, to: usize) {
+    let key = id.with("focus-frames");
+    let left = if first { 2u8 } else { ui.data(|d| d.get_temp::<u8>(key)).unwrap_or(0) };
+    if left > 0 {
+        focus_select(ui, id, from, to);
+        ui.data_mut(|d| d.insert_temp(key, left - 1));
+    }
+}
+
+fn text_field(ui: &mut Ui, text: &mut String, id: &str, first: bool) -> egui::Response {
     let id = egui::Id::unique(id);
-    if focus && select_all {
-        let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-            egui::text::CCursor::new(0),
-            egui::text::CCursor::new(text.chars().count()),
-        )));
-        state.store(ui.ctx(), id);
-    }
-    let resp = ui.add(egui::TextEdit::singleline(text).id(id).desired_width(f32::INFINITY));
-    if focus {
-        resp.request_focus();
-    }
-    resp
+    focus_select_modal(ui, id, first, 0, text.chars().count());
+    ui.add(egui::TextEdit::singleline(text).id(id).desired_width(f32::INFINITY))
 }
 
 pub fn draw(app: &mut App, ctx: &Context) {
@@ -179,7 +189,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
             *init = false;
             let (r, esc) = modal(ctx, "dlg-input", title, &pal, 420.0, |ui| {
                 ui.label(prompt.as_str());
-                let resp = text_field(ui, text, "dlg-input-text", first, true);
+                let resp = text_field(ui, text, "dlg-input-text", first);
                 if !history.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("History:").weak());
@@ -190,8 +200,9 @@ pub fn draw(app: &mut App, ctx: &Context) {
                         }
                     });
                 }
+                let _ = resp;
                 let b = buttons(ui, &["OK", "Cancel"]);
-                if resp.lost_focus() && enter(ui) { Some(0) } else { b }
+                if enter(ui) { Some(0) } else { b }
             });
             match (r, esc) {
                 (Some(0), _) => {
@@ -210,24 +221,14 @@ pub fn draw(app: &mut App, ctx: &Context) {
             let (r, esc) = modal(ctx, "dlg-transfer", title, &pal, 520.0, |ui| {
                 ui.label(label.as_str());
                 let id = egui::Id::unique("dlg-transfer-target");
-                if first {
-                    // Select the file name part (after the last backslash), like TC.
-                    let start = target.rfind('\\').map(|i| target[..=i].chars().count()).unwrap_or(0);
-                    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                        egui::text::CCursor::new(start),
-                        egui::text::CCursor::new(target.chars().count()),
-                    )));
-                    state.store(ui.ctx(), id);
-                }
-                let resp = ui.add(egui::TextEdit::singleline(target).id(id).desired_width(f32::INFINITY));
-                if first {
-                    resp.request_focus();
-                }
+                // Select the file name part (after the last backslash), like TC.
+                let start = target.rfind('\\').map(|i| target[..=i].chars().count()).unwrap_or(0);
+                focus_select_modal(ui, id, first, start, target.chars().count());
+                ui.add(egui::TextEdit::singleline(target).id(id).desired_width(f32::INFINITY));
                 ui.add_space(4.0);
                 ui.label(RichText::new("Wildcards rename on the fly: *.bak, new_*.*, h?.txt").weak().small());
                 let b = buttons(ui, &["OK", "Cancel"]);
-                if resp.lost_focus() && enter(ui) { Some(0) } else { b }
+                if enter(ui) { Some(0) } else { b }
             });
             match (r, esc) {
                 (Some(0), _) => {
@@ -239,14 +240,21 @@ pub fn draw(app: &mut App, ctx: &Context) {
                 _ => true,
             }
         }
-        Dialog::Pack { label, sources, target, move_files } => {
+        Dialog::Pack { label, sources, target, move_files, init } => {
+            let first = std::mem::take(init);
             let (r, esc) = modal(ctx, "dlg-pack", "Pack files", &pal, 520.0, |ui| {
                 ui.label(label.as_str());
-                let resp = ui.add(egui::TextEdit::singleline(target).desired_width(f32::INFINITY));
+                let id = egui::Id::unique("dlg-pack-target");
+                // Select the archive name without ".zip".
+                let n = target.chars().count();
+                let start = target.rfind('\\').map(|i| target[..=i].chars().count()).unwrap_or(0);
+                let end = if target.to_lowercase().ends_with(".zip") { n - 4 } else { n };
+                focus_select_modal(ui, id, first, start, end);
+                ui.add(egui::TextEdit::singleline(target).id(id).desired_width(f32::INFINITY));
                 ui.checkbox(move_files, "Move to archive (delete originals)");
                 ui.label(RichText::new("Format: ZIP (Deflate). Existing archives are updated.").weak().small());
                 let b = buttons(ui, &["OK", "Cancel"]);
-                if resp.lost_focus() && enter(ui) { Some(0) } else { b }
+                if enter(ui) { Some(0) } else { b }
             });
             match (r, esc) {
                 (Some(0), _) => {
@@ -267,7 +275,8 @@ pub fn draw(app: &mut App, ctx: &Context) {
                 _ => true,
             }
         }
-        Dialog::Unpack { archives, target, separate } => {
+        Dialog::Unpack { archives, target, separate, init } => {
+            let first = std::mem::take(init);
             let what = if archives.len() == 1 {
                 archives[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
             } else {
@@ -275,10 +284,12 @@ pub fn draw(app: &mut App, ctx: &Context) {
             };
             let (r, esc) = modal(ctx, "dlg-unpack", "Unpack files", &pal, 520.0, |ui| {
                 ui.label(format!("Unpack {what} to:"));
-                let resp = ui.add(egui::TextEdit::singleline(target).desired_width(f32::INFINITY));
+                let id = egui::Id::unique("dlg-unpack-target");
+                focus_select_modal(ui, id, first, 0, target.chars().count());
+                ui.add(egui::TextEdit::singleline(target).id(id).desired_width(f32::INFINITY));
                 ui.checkbox(separate, "Unpack each archive to a separate subdirectory (name of the archive)");
                 let b = buttons(ui, &["OK", "Cancel"]);
-                if resp.lost_focus() && enter(ui) { Some(0) } else { b }
+                if enter(ui) { Some(0) } else { b }
             });
             match (r, esc) {
                 (Some(0), _) => {

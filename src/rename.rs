@@ -297,15 +297,8 @@ impl RenameTool {
         egui::Grid::new("mrt").num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
             ui.label("Rename mask: file name");
             let id = egui::Id::unique("mrt-name-mask");
-            let resp = ui.add(egui::TextEdit::singleline(&mut r.name_mask).id(id).desired_width(220.0));
-            if self.focus > 0 {
-                self.focus -= 1;
-                resp.request_focus();
-                let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-                let n = r.name_mask.chars().count();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
-                state.store(ui.ctx(), id);
-            }
+            crate::dialogs::focus_select_modal(ui, id, std::mem::take(&mut self.focus) > 0, 0, r.name_mask.chars().count());
+            ui.add(egui::TextEdit::singleline(&mut r.name_mask).id(id).desired_width(220.0));
             ui.label("Extension");
             ui.add(egui::TextEdit::singleline(&mut r.ext_mask).desired_width(120.0));
             ui.end_row();
