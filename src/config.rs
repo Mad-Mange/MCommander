@@ -149,6 +149,13 @@ impl Default for Config {
     }
 }
 
+/// Size of the virtual desktop, as Total Commander keys its window positions.
+fn screen_size() -> Option<(i64, i64)> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN};
+    let (w, h) = unsafe { (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)) };
+    (w > 0 && h > 0).then_some((w as i64, h as i64))
+}
+
 pub fn default_config_path() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("MCommander").join("mcommander.ini")
@@ -368,6 +375,7 @@ impl Config {
 
     /// Imports the parts of a `wincmd.ini` that map onto MCommander settings.
     pub fn import_tc(&mut self, ini: &Ini) {
+        self.import_tc_window(ini, screen_size());
         let cfg = "Configuration";
         if let Some(v) = ini.get_i64(cfg, "AltSearch") {
             self.quick_search = QuickSearchMode::from_i64(v);
@@ -444,6 +452,35 @@ impl Config {
         }
     }
 
+    /// TC stores the window position per desktop resolution in sections named
+    /// like `[5120x1440 (8x16)]`; prefer the one matching the current screen.
+    fn import_tc_window(&mut self, ini: &Ini, screen: Option<(i64, i64)>) {
+        let parse = |name: &str| -> Option<(i64, i64)> {
+            let res = name.split_whitespace().next()?;
+            let (w, h) = res.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        };
+        let candidates: Vec<_> = ini
+            .sections
+            .iter()
+            .filter(|s| parse(&s.name).is_some() && s.get("dx").is_some() && s.get("dy").is_some())
+            .collect();
+        let Some(sec) = candidates
+            .iter()
+            .find(|s| screen.is_some() && parse(&s.name) == screen)
+            .or(candidates.first())
+        else {
+            return;
+        };
+        let num = |k: &str| sec.get(k).and_then(|v| v.trim().parse::<f32>().ok());
+        if let (Some(x), Some(y), Some(w), Some(h)) = (num("x"), num("y"), num("dx"), num("dy")) {
+            if w > 200.0 && h > 150.0 {
+                self.window = Some([x, y, w, h]);
+            }
+        }
+        self.maximized = sec.get("maximized").is_some_and(|v| v.trim() == "1");
+    }
+
     pub fn push_history(list: &mut Vec<String>, value: &str) {
         if value.trim().is_empty() {
             return;
@@ -494,6 +531,20 @@ path=c:\Users\me\Downloads\
         assert_eq!(c.hotlist[0], HotlistEntry { name: "Downloads".into(), path: r"c:\Users\me\Downloads".into() });
         assert_eq!(c.hotlist[1].path, "");
         assert_eq!(c.cmd_history, vec!["code .".to_string(), "cmd".to_string()]);
+    }
+
+    #[test]
+    fn imports_window_position_for_matching_resolution() {
+        let ini = Ini::parse(
+            "[1920x1080 (8x16)]\nx=10\ny=20\ndx=900\ndy=700\nmaximized=1\n[5120x1440 (8x16)]\nx=2010\ny=66\ndx=1100\ndy=1201\nmaximized=0\n",
+        );
+        let mut c = Config::default();
+        c.import_tc_window(&ini, Some((5120, 1440)));
+        assert_eq!(c.window, Some([2010.0, 66.0, 1100.0, 1201.0]));
+        assert!(!c.maximized);
+        c.import_tc_window(&ini, Some((800, 600)));
+        assert_eq!(c.window, Some([10.0, 20.0, 900.0, 700.0]));
+        assert!(c.maximized);
     }
 
     #[test]
