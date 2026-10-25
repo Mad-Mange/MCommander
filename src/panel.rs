@@ -66,7 +66,26 @@ pub struct Stats {
     pub total_dirs: usize,
 }
 
+/// Result of reading a location: entries plus the archive index, if any.
+pub type Listing = Result<(Vec<FileEntry>, Option<Arc<ZipIndex>>), String>;
+
+static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Reads a file-system directory; safe to call from a worker thread.
+pub fn read_fs(path: &std::path::Path, branch: bool, opts: ListOptions) -> Listing {
+    if branch {
+        Ok((vfs::list_branch(path, opts, 200_000), None))
+    } else {
+        vfs::list_fs(path, opts).map(|v| (v, None)).map_err(|e| format!("{}: {}", path.display(), e))
+    }
+}
+
 pub struct Tab {
+    /// Stable identity, used to route results of background listings.
+    pub id: u64,
+    /// Location being read in the background (slow drives); the old entries
+    /// stay visible meanwhile.
+    pub loading: Option<Location>,
     pub loc: Location,
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
@@ -95,6 +114,8 @@ pub struct Tab {
 impl Tab {
     pub fn new(loc: Location, sort: SortSpec, view: ViewMode) -> Tab {
         Tab {
+            id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            loading: None,
             history: vec![loc.clone()],
             loc,
             entries: Vec::new(),
@@ -117,10 +138,9 @@ impl Tab {
         }
     }
 
-    fn read(&self, loc: &Location, opts: ListOptions, zips: &mut ZipCache) -> Result<(Vec<FileEntry>, Option<Arc<ZipIndex>>), String> {
+    fn read(&self, loc: &Location, branch: bool, opts: ListOptions, zips: &mut ZipCache) -> Listing {
         match loc {
-            Location::Fs(p) if self.branch => Ok((vfs::list_branch(p, opts, 200_000), None)),
-            Location::Fs(p) => vfs::list_fs(p, opts).map(|v| (v, None)).map_err(|e| format!("{}: {}", p.display(), e)),
+            Location::Fs(p) => read_fs(p, branch, opts),
             Location::Archive { archive, inner } => {
                 let idx = zips.get(archive)?;
                 Ok((vfs::list_archive(&idx, inner), Some(idx)))
@@ -152,12 +172,19 @@ impl Tab {
 
     /// Changes to a new location. On failure the tab stays where it was.
     pub fn go(&mut self, loc: Location, focus: Option<&str>, opts: ListOptions, zips: &mut ZipCache) -> Result<(), String> {
-        let was_branch = self.branch;
-        if loc != self.loc {
-            self.branch = false;
-        }
-        match self.read(&loc, opts, zips) {
+        let branch = self.branch && loc == self.loc;
+        let listing = self.read(&loc, branch, opts, zips);
+        self.loading = None;
+        self.finish_go(loc, listing, focus)
+    }
+
+    /// Applies the result of reading `loc` for a navigation.
+    pub fn finish_go(&mut self, loc: Location, listing: Listing, focus: Option<&str>) -> Result<(), String> {
+        match listing {
             Ok((entries, zip)) => {
+                if loc != self.loc {
+                    self.branch = false;
+                }
                 self.zip = zip;
                 self.error = None;
                 if loc != self.loc {
@@ -180,21 +207,24 @@ impl Tab {
                 self.loaded_at = Instant::now();
                 Ok(())
             }
-            Err(e) => {
-                self.branch = was_branch;
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
     /// Re-reads the current location, keeping cursor, selection and computed sizes.
     pub fn refresh(&mut self, opts: ListOptions, zips: &mut ZipCache) {
+        let listing = self.read(&self.loc.clone(), self.branch, opts, zips);
+        self.finish_refresh(listing, opts, zips);
+    }
+
+    /// Applies a re-read of the current location.
+    pub fn finish_refresh(&mut self, listing: Listing, opts: ListOptions, zips: &mut ZipCache) {
         let cursor_name = self.cursor_entry().map(|e| e.name.clone());
         let selected: HashSet<String> = self.entries.iter().filter(|e| e.selected).map(|e| key_of(e)).collect();
         let sizes: HashMap<String, u64> =
             self.entries.iter().filter_map(|e| e.dir_size.map(|s| (key_of(e), s))).collect();
         let old_cursor = self.cursor;
-        match self.read(&self.loc.clone(), opts, zips) {
+        match listing {
             Ok((mut entries, zip)) => {
                 for e in entries.iter_mut() {
                     let k = key_of(e);

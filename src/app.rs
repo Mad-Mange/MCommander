@@ -73,6 +73,8 @@ pub enum BgMsg {
     Occupied { bytes: u64, files: u64, dirs: u64 },
     Message { title: String, text: String, error: bool },
     Refresh,
+    /// A background directory listing finished (slow drives).
+    Listed { tab_id: u64, loc: Location, listing: crate::panel::Listing, focus: Option<String>, refresh: bool },
 }
 
 pub enum Preview {
@@ -225,9 +227,14 @@ impl App {
         };
         let lo = app.list_opts();
         for side in [Side::Left, Side::Right] {
-            let panel = &mut app.panels[side.index()];
-            for tab in panel.tabs.iter_mut() {
-                let loc = tab.loc.clone();
+            for i in 0..app.panels[side.index()].tabs.len() {
+                let loc = app.panels[side.index()].tabs[i].loc.clone();
+                if app.is_slow(&loc) {
+                    // Network or removable drive: don't block startup.
+                    app.spawn_listing(side, i, loc, None, false);
+                    continue;
+                }
+                let tab = &mut app.panels[side.index()].tabs[i];
                 if tab.go(loc.clone(), None, lo, &mut app.zips).is_err() {
                     // Saved path no longer exists: fall back to the nearest existing parent.
                     let mut p = loc.fs_path().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("C:\\"));
@@ -285,8 +292,74 @@ impl App {
 
     // ---- navigation ---------------------------------------------------------
 
+    /// Locations whose listing may take long (network shares, removable and
+    /// optical drives); these are read on a worker thread.
+    pub fn is_slow(&self, loc: &Location) -> bool {
+        let Location::Fs(p) = loc else { return false };
+        if p.to_string_lossy().starts_with("\\\\") {
+            return true;
+        }
+        loc.drive_letter().is_some_and(|l| {
+            self.drives.iter().any(|d| {
+                d.letter == l && matches!(d.kind, win::DriveKind::Network | win::DriveKind::Removable | win::DriveKind::Cdrom | win::DriveKind::Unknown)
+            })
+        })
+    }
+
+    /// Reads `loc` for tab `index` of `side` in the background.
+    pub fn spawn_listing(&mut self, side: Side, index: usize, loc: Location, focus: Option<String>, refresh: bool) {
+        let Location::Fs(path) = loc.clone() else { return };
+        let opts = self.list_opts();
+        let tab = &mut self.panels[side.index()].tabs[index];
+        let branch = tab.branch && loc == tab.loc;
+        tab.loading = Some(loc.clone());
+        let tab_id = tab.id;
+        let tx = self.bg_tx.clone();
+        let ctx = self.ctx_clone();
+        std::thread::spawn(move || {
+            let listing = crate::panel::read_fs(&path, branch, opts);
+            let _ = tx.send(BgMsg::Listed { tab_id, loc, listing, focus, refresh });
+            ctx.request_repaint();
+        });
+    }
+
+    fn finish_listing(&mut self, tab_id: u64, loc: Location, listing: crate::panel::Listing, focus: Option<String>, refresh: bool) {
+        let lo = self.list_opts();
+        let mut failed = None;
+        for side in [Side::Left, Side::Right] {
+            let Some(tab) = self.panels[side.index()].tabs.iter_mut().find(|t| t.id == tab_id) else { continue };
+            if tab.loading.as_ref() != Some(&loc) {
+                return; // Cancelled or superseded by another navigation.
+            }
+            tab.loading = None;
+            if refresh {
+                tab.finish_refresh(listing, lo, &mut self.zips);
+            } else if let Err(e) = tab.finish_go(loc, listing, focus.as_deref()) {
+                if tab.entries.is_empty() {
+                    // Nothing shown yet (startup): fall back to the system drive.
+                    let _ = tab.go(Location::fs("C:\\"), None, lo, &mut self.zips);
+                }
+                failed = Some(e);
+            }
+            self.panels[side.index()].remember_drive();
+            break;
+        }
+        self.update_watches();
+        if let Some(e) = failed {
+            self.error(e);
+        }
+    }
+
     pub fn go(&mut self, side: Side, loc: Location, focus: Option<&str>) {
         let lo = self.list_opts();
+        if self.is_slow(&loc) && !self.tab(side).locked {
+            if self.rename.as_ref().is_some_and(|r| r.side == side) {
+                self.rename = None;
+            }
+            let index = self.panels[side.index()].active;
+            self.spawn_listing(side, index, loc, focus.map(str::to_string), false);
+            return;
+        }
         let tab = self.panels[side.index()].tab_mut();
         if tab.locked && loc != tab.loc {
             // Locked tabs open a new tab instead of navigating away.
@@ -312,6 +385,14 @@ impl App {
 
     pub fn refresh(&mut self, side: Side) {
         let lo = self.list_opts();
+        let loc = self.tab(side).loc.clone();
+        if self.is_slow(&loc) {
+            if self.tab(side).loading.is_none() {
+                let index = self.panels[side.index()].active;
+                self.spawn_listing(side, index, loc, None, true);
+            }
+            return;
+        }
         self.panels[side.index()].tab_mut().refresh(lo, &mut self.zips);
         self.update_watches();
     }
@@ -590,6 +671,7 @@ impl App {
                     self.dialog = Some(Dialog::Message { title, text, error });
                 }
                 BgMsg::Refresh => self.refresh_all(),
+                BgMsg::Listed { tab_id, loc, listing, focus, refresh } => self.finish_listing(tab_id, loc, listing, focus, refresh),
             }
         }
         if self.drives_at.elapsed() > Duration::from_secs(2) {
@@ -836,7 +918,10 @@ impl App {
             }
         }
         if escape {
-            if self.quick.is_some() {
+            if self.atab().loading.is_some() {
+                // Stop waiting for a slow drive; the result will be ignored.
+                self.atab_mut().loading = None;
+            } else if self.quick.is_some() {
                 self.quick = None;
             } else if !self.cmdline.is_empty() || self.cmd_active {
                 self.cmdline.clear();

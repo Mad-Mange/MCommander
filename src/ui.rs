@@ -906,8 +906,15 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     }
     if let Some(err) = app.tab(side).error.clone() {
         painter.text(list_rect.center(), Align2::CENTER_CENTER, err, fnt.clone(), pal.error);
-    } else if n == 0 {
+    } else if n == 0 && app.tab(side).loading.is_none() {
         painter.text(list_rect.center_top() + vec2(0.0, 30.0), Align2::CENTER_CENTER, "(empty)", fnt.clone(), pal.text_dim);
+    }
+    if let Some(loading) = app.tab(side).loading.clone() {
+        let text = format!("Reading {} ...   (Esc cancels)", loading.display());
+        let galley = painter.layout_no_wrap(text, fnt.clone(), pal.text);
+        let r = Rect::from_center_size(list_rect.center(), galley.size() + vec2(28.0, 16.0)).intersect(list_rect);
+        painter.rect(r, 4.0, pal.bar, Stroke::new(1.0, pal.accent), StrokeKind::Inside);
+        painter.galley(r.min + vec2(14.0, 8.0), galley, pal.text);
     }
 
     // Inline rename editor.
