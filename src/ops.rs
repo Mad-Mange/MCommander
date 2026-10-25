@@ -103,9 +103,7 @@ struct Shared {
 }
 
 pub struct Job {
-    pub id: u64,
     pub background: bool,
-    pub request: OpRequest,
     shared: Arc<Shared>,
 }
 
@@ -151,12 +149,12 @@ impl Job {
             rename_all: false,
             started: Instant::now(),
         };
-        let req = request.clone();
+        let req = request;
         std::thread::Builder::new()
             .name(format!("job-{id}"))
             .spawn(move || worker.run(req))
             .expect("spawn job thread");
-        Job { id, background: false, request, shared }
+        Job { background: false, shared }
     }
 
     pub fn progress(&self) -> Progress {

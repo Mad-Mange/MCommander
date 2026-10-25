@@ -15,7 +15,6 @@ pub struct Palette {
     pub text_dim: Color32,
     pub marked: Color32,
     pub cursor_fill: Color32,
-    pub cursor_fill_inactive: Color32,
     pub cursor_border: Color32,
     pub header_active: Color32,
     pub header_inactive: Color32,
@@ -34,7 +33,6 @@ pub struct Palette {
     pub tab_inactive: Color32,
     pub scrollbar_track: Color32,
     pub scrollbar_thumb: Color32,
-    pub icon_tint: Color32,
 }
 
 impl Palette {
@@ -48,7 +46,6 @@ impl Palette {
             text_dim: Color32::from_rgb(0x6D, 0x6D, 0x6D),
             marked: Color32::from_rgb(0xE8, 0x11, 0x23),
             cursor_fill: Color32::from_rgb(0xCC, 0xE8, 0xFF),
-            cursor_fill_inactive: Color32::from_rgb(0xE5, 0xF3, 0xFF),
             cursor_border: Color32::from_rgb(0x1E, 0x1E, 0x1E),
             header_active: Color32::from_rgb(0x99, 0xB4, 0xD1),
             header_inactive: Color32::from_rgb(0xBF, 0xCD, 0xDB),
@@ -67,7 +64,6 @@ impl Palette {
             tab_inactive: Color32::from_rgb(0xE6, 0xE6, 0xE6),
             scrollbar_track: Color32::from_rgb(0xF0, 0xF0, 0xF0),
             scrollbar_thumb: Color32::from_rgb(0xC2, 0xC2, 0xC2),
-            icon_tint: Color32::WHITE,
         }
     }
 
@@ -81,7 +77,6 @@ impl Palette {
             text_dim: Color32::from_rgb(0x9A, 0x9A, 0x9A),
             marked: Color32::from_rgb(0xFF, 0x6B, 0x6B),
             cursor_fill: Color32::from_rgb(0x26, 0x4F, 0x78),
-            cursor_fill_inactive: Color32::from_rgb(0x2E, 0x3A, 0x46),
             cursor_border: Color32::from_rgb(0x8C, 0xB4, 0xDC),
             header_active: Color32::from_rgb(0x3D, 0x5A, 0x80),
             header_inactive: Color32::from_rgb(0x33, 0x3B, 0x45),
@@ -100,7 +95,6 @@ impl Palette {
             tab_inactive: Color32::from_rgb(0x2B, 0x2B, 0x2B),
             scrollbar_track: Color32::from_rgb(0x20, 0x20, 0x20),
             scrollbar_thumb: Color32::from_rgb(0x55, 0x55, 0x55),
-            icon_tint: Color32::from_rgb(0xF2, 0xF2, 0xF2),
         }
     }
 

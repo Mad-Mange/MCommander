@@ -93,10 +93,6 @@ impl Ini {
     pub fn set(&mut self, section: &str, key: &str, value: impl ToString) {
         self.section_mut(section).set(key, value.to_string());
     }
-
-    pub fn clear_section(&mut self, section: &str) {
-        self.section_mut(section).entries.clear();
-    }
 }
 
 impl std::fmt::Display for Ini {

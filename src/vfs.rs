@@ -64,10 +64,6 @@ impl Location {
         }
     }
 
-    pub fn is_archive(&self) -> bool {
-        matches!(self, Location::Archive { .. })
-    }
-
     /// The real directory backing this location (for archives: the folder
     /// containing the archive), used for the command line and free space.
     pub fn host_dir(&self) -> Option<PathBuf> {
@@ -90,14 +86,6 @@ impl Location {
         match (chars.next(), chars.next()) {
             (Some(c), Some(':')) if c.is_ascii_alphabetic() => Some(c.to_ascii_uppercase()),
             _ => None,
-        }
-    }
-
-    pub fn is_root(&self) -> bool {
-        match self {
-            Location::Fs(p) => p.parent().is_none(),
-            Location::Archive { .. } => false,
-            Location::Results { .. } => true,
         }
     }
 
@@ -236,10 +224,6 @@ impl FileEntry {
 
     pub fn ext(&self) -> &str {
         format::split_ext(&self.name, self.is_dir).1
-    }
-
-    pub fn stem(&self) -> &str {
-        format::split_ext(self.name_shown(), self.is_dir).0
     }
 
     pub fn name_shown(&self) -> &str {
@@ -585,7 +569,7 @@ mod tests {
         assert_eq!(name, "MCommander");
         let root = Location::fs("d:");
         assert_eq!(root.display(), r"d:\");
-        assert!(root.is_root());
+        assert!(root.parent().is_none());
         assert!(root.parent().is_none());
         assert_eq!(loc.drive_letter(), Some('D'));
 

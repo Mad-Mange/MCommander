@@ -91,9 +91,4 @@ impl IconCache {
         let root = format!("{letter}:\\");
         self.request(format!("drive:{letter}"), root, true, false)
     }
-
-    pub fn by_path(&mut self, path: &Path, is_dir: bool) -> Option<egui::TextureId> {
-        let p = path.to_string_lossy().into_owned();
-        self.request(format!("path:{p}"), p, is_dir, false)
-    }
 }

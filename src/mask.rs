@@ -77,10 +77,6 @@ impl MaskSet {
         m
     }
 
-    pub fn is_all(&self) -> bool {
-        self.exclude.is_empty() && self.include.iter().any(|p| p == "*" || p == "*.*")
-    }
-
     pub fn matches(&self, name: &str, is_dir: bool) -> bool {
         let hit = |pats: &[String]| {
             pats.iter().any(|p| match p.strip_suffix('\\') {
@@ -225,7 +221,7 @@ mod tests {
         assert!(!m.matches("target", true));
         assert!(m.matches("target", false));
         assert!(m.matches("src", true));
-        assert!(MaskSet::parse("").is_all());
+        assert!(MaskSet::parse("").matches("anything.x", false));
     }
 
     #[test]

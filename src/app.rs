@@ -1346,7 +1346,7 @@ impl App {
                     self.dialog = Some(Dialog::Tree(Box::new(crate::tree::TreeDialog::new(&dir, self.cfg.show_hidden))));
                 }
             }
-            View => self.view_current(ctx),
+            View => self.view_current(),
             Edit => {
                 let c = self.atab().cursor;
                 if self.atab().entries.get(c).is_some_and(|e| !e.is_dir) {
@@ -1886,7 +1886,7 @@ impl App {
         });
     }
 
-    fn view_current(&mut self, ctx: &egui::Context) {
+    fn view_current(&mut self) {
         let side = self.active;
         let c = self.atab().cursor;
         let Some(entry) = self.atab().entries.get(c).cloned() else { return };
@@ -2153,16 +2153,6 @@ fn letter_of(key: Key) -> Option<char> {
     match (chars.next(), chars.next()) {
         (Some(c), None) if c.is_ascii_alphanumeric() => Some(c.to_ascii_lowercase()),
         _ => None,
-    }
-}
-
-trait ShiftOnly {
-    fn shift_only(&self) -> bool;
-}
-
-impl ShiftOnly for Modifiers {
-    fn shift_only(&self) -> bool {
-        self.shift && !self.ctrl && !self.alt
     }
 }
 

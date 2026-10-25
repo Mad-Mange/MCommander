@@ -134,15 +134,24 @@ fn menu_bar(app: &mut App, ui: &mut Ui) {
 // ---- toolbar ------------------------------------------------------------------------
 
 fn tool_button(app: &mut App, ui: &mut Ui, icon: Icon, tip: &str, cmd: Cmd, on: bool) {
+    tool_button_enabled(app, ui, icon, tip, cmd, on, true);
+}
+
+fn tool_button_enabled(app: &mut App, ui: &mut Ui, icon: Icon, tip: &str, cmd: Cmd, on: bool, enabled: bool) {
     let size = vec2(28.0, 28.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
     let pal = &app.pal;
-    if on || resp.hovered() {
+    if enabled && (on || resp.hovered()) {
         let fill = if on { pal.pressed } else { pal.hover };
         ui.painter().rect(rect, 2.0, fill, Stroke::new(1.0, pal.button_border), StrokeKind::Inside);
     }
-    paint_icons::paint(ui.painter(), rect.shrink(5.0), icon, pal.text);
-    if resp.on_hover_text(tip).clicked() {
+    let mut painter = ui.painter().clone();
+    if !enabled {
+        painter.multiply_opacity(0.35);
+    }
+    paint_icons::paint(&painter, rect.shrink(5.0), icon, pal.text);
+    if resp.on_hover_text(tip).clicked() && enabled {
         app.pending.push(cmd);
     }
 }
@@ -168,8 +177,9 @@ fn toolbar(app: &mut App, ui: &mut Ui) {
         tool_sep(ui, &pal);
         tool_button(app, ui, Icon::Invert, "Invert selection (Num *)", Cmd::InvertSelection, false);
         tool_sep(ui, &pal);
-        tool_button(app, ui, Icon::Back, "Back (Alt+Left)", Cmd::HistoryBack, false);
-        tool_button(app, ui, Icon::Forward, "Forward (Alt+Right)", Cmd::HistoryForward, false);
+        let (back, fwd) = (app.atab().can_go_back(), app.atab().can_go_forward());
+        tool_button_enabled(app, ui, Icon::Back, "Back (Alt+Left)", Cmd::HistoryBack, false, back);
+        tool_button_enabled(app, ui, Icon::Forward, "Forward (Alt+Right)", Cmd::HistoryForward, false, fwd);
         tool_sep(ui, &pal);
         tool_button(app, ui, Icon::Pack, "Pack files (Alt+F5)", Cmd::Pack, false);
         tool_button(app, ui, Icon::Unpack, "Unpack files (Alt+F9)", Cmd::Unpack, false);
@@ -309,7 +319,7 @@ fn middle_bar(app: &mut App, ui: &mut Ui, rect: Rect, full: Rect) {
         return;
     }
     let mut y = rect.top() + DRIVEBAR_H + INFO_H + HEADER_H + COLHDR_H + 8.0;
-    let buttons: [Option<(Icon, &str, Cmd)>; 7] = [
+    let buttons: [Option<(Icon, &str, Cmd)>; 8] = [
         Some((Icon::View, "View (F3)", Cmd::View)),
         Some((Icon::Edit, "Edit (F4)", Cmd::Edit)),
         Some((Icon::Copy, "Copy (F5)", Cmd::Copy)),
@@ -317,6 +327,7 @@ fn middle_bar(app: &mut App, ui: &mut Ui, rect: Rect, full: Rect) {
         None,
         Some((Icon::Pack, "Pack (Alt+F5)", Cmd::Pack)),
         Some((Icon::MkDir, "New folder (F7)", Cmd::MkDir)),
+        Some((Icon::Delete, "Delete (F8)", Cmd::Delete)),
     ];
     for b in buttons {
         let Some((icon, tip, cmd)) = b else {

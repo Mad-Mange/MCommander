@@ -8,7 +8,6 @@ pub const ATTR_SYSTEM: u32 = 0x4;
 pub const ATTR_DIRECTORY: u32 = 0x10;
 pub const ATTR_ARCHIVE: u32 = 0x20;
 pub const ATTR_REPARSE: u32 = 0x400;
-pub const ATTR_COMPRESSED: u32 = 0x800;
 
 /// `136999212` -> `"136 999 212"`.
 pub fn thousands(n: u64) -> String {

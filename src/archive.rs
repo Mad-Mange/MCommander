@@ -17,7 +17,6 @@ pub struct ZipItem {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
-    pub packed: u64,
     pub modified: Option<SystemTime>,
     pub index: usize,
 }
@@ -67,7 +66,6 @@ impl ZipIndex {
                 path: norm,
                 is_dir: f.is_dir(),
                 size: f.size(),
-                packed: f.compressed_size(),
                 modified: f.last_modified().and_then(zip_time_to_system),
                 index: i,
             });
@@ -133,11 +131,6 @@ impl ZipIndex {
             .iter()
             .filter(|it| !it.is_dir && paths.iter().any(|p| it.path == *p || it.path.starts_with(&format!("{p}/"))))
             .collect()
-    }
-
-    pub fn unpacked_size(&self, inner_dir: &str) -> u64 {
-        let prefix = format!("{inner_dir}/");
-        self.items.iter().filter(|i| i.path.starts_with(&prefix)).map(|i| i.size).sum()
     }
 }
 
@@ -320,7 +313,6 @@ mod tests {
         let sub = idx.children("sub");
         assert_eq!(sub.len(), 1);
         assert_eq!(sub[0].name, "b.txt");
-        assert_eq!(idx.unpacked_size("sub"), 5);
         assert_eq!(idx.files_under(&["sub".into()]).len(), 1);
 
         // Delete "sub" and add a file into a nested folder.
