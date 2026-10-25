@@ -1105,6 +1105,30 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
             painter.galley(r.min + vec2(5.0, 3.0), galley, app.pal.text);
         }
     }
+    // Leaving the window hands the drag over to Windows (Explorer, browsers...).
+    let active = app.drag.as_ref().is_some_and(|d| d.active);
+    if let (true, false, Some(hwnd)) = (active, released, app.hwnd) {
+        if crate::win::cursor_outside(hwnd) {
+            let drag = app.drag.take().unwrap();
+            let tab = app.tab(drag.side);
+            let paths: Vec<std::path::PathBuf> = tab
+                .entries
+                .iter()
+                .filter(|e| drag.names.contains(&e.name))
+                .filter_map(|e| tab.loc.child_path(e))
+                .collect();
+            if !paths.is_empty() {
+                let result = crate::win::drag_files_out(hwnd, &paths);
+                app.release_pointer = true;
+                match result {
+                    Ok(0) => {}
+                    Ok(_) => app.refresh_all(),
+                    Err(e) => app.toast(format!("Drag & drop: {e}")),
+                }
+            }
+            return;
+        }
+    }
     if !released {
         return;
     }

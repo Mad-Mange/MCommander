@@ -576,24 +576,16 @@ pub enum MenuOutcome {
     Rename,
 }
 
-/// Shows the Explorer context menu for items that share one parent folder.
-/// `client_pt` is in physical pixels relative to the window's client area;
-/// `None` uses the mouse position.
-pub fn shell_context_menu(hwnd: HWND, paths: &[PathBuf], client_pt: Option<(i32, i32)>, extended: bool) -> Result<MenuOutcome, String> {
-    use windows::Win32::Graphics::Gdi::ClientToScreen;
+/// Resolves files of one folder to shell items and calls `f` with the
+/// parent folder and the child item ids (freed afterwards).
+fn with_shell_items<R>(
+    paths: &[PathBuf],
+    f: impl FnOnce(&windows::Win32::UI::Shell::IShellFolder, &[*const windows::Win32::UI::Shell::Common::ITEMIDLIST]) -> windows::core::Result<R>,
+) -> Result<R, String> {
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-    use windows::Win32::UI::Shell::{
-        CMF_CANRENAME, CMF_EXPLORE, CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
-        CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu, IShellFolder, ILFindLastID, ILFree, SHBindToParent,
-        SHParseDisplayName,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
-    };
-    use windows::core::{PCSTR, PSTR};
-    const CMIC_MASK_UNICODE: u32 = 0x4000;
+    use windows::Win32::UI::Shell::{ILFindLastID, ILFree, IShellFolder, SHBindToParent, SHParseDisplayName};
     if paths.is_empty() {
-        return Ok(MenuOutcome::Cancelled);
+        return Err("nothing selected".into());
     }
     unsafe {
         let mut pidls: Vec<*mut ITEMIDLIST> = Vec::new();
@@ -608,10 +600,66 @@ pub fn shell_context_menu(hwnd: HWND, paths: &[PathBuf], client_pt: Option<(i32,
             }
             pidls.push(pidl);
         }
-        let result = (|| -> windows::core::Result<MenuOutcome> {
+        let result = (|| {
             let folder: IShellFolder = SHBindToParent(pidls[0], None)?;
             let children: Vec<*const ITEMIDLIST> = pidls.iter().map(|&p| ILFindLastID(p) as *const ITEMIDLIST).collect();
-            let cm: IContextMenu = folder.GetUIObjectOf(hwnd, &children, None)?;
+            f(&folder, &children)
+        })();
+        for p in pidls {
+            ILFree(Some(p));
+        }
+        result.map_err(|e| e.message())
+    }
+}
+
+/// True when the mouse cursor is outside the window (drag leaving the app).
+pub fn cursor_outside(hwnd: HWND) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+    let mut pt = POINT::default();
+    let mut r = RECT::default();
+    unsafe {
+        if GetCursorPos(&mut pt).is_err() || GetWindowRect(hwnd, &mut r).is_err() {
+            return false;
+        }
+    }
+    pt.x < r.left || pt.x >= r.right || pt.y < r.top || pt.y >= r.bottom
+}
+
+/// Drags files out of the window with OLE (to Explorer, browsers, editors).
+/// Blocks until the drop; returns the effect the target chose (1 copy, 2 move, 4 link, 0 none).
+pub fn drag_files_out(hwnd: HWND, paths: &[PathBuf]) -> Result<u32, String> {
+    use windows::Win32::System::Com::IDataObject;
+    use windows::Win32::System::Ole::{DROPEFFECT, IDropSource};
+    use windows::Win32::UI::Shell::SHDoDragDrop;
+    with_shell_items(paths, |folder, children| unsafe {
+        let data: IDataObject = folder.GetUIObjectOf(hwnd, children, None)?;
+        // Copy | move | link: the drop target picks, as with Explorer.
+        let effect = SHDoDragDrop(Some(hwnd), &data, None::<&IDropSource>, DROPEFFECT(1 | 2 | 4))?;
+        Ok(effect.0)
+    })
+}
+
+/// Shows the Explorer context menu for items that share one parent folder.
+/// `client_pt` is in physical pixels relative to the window's client area;
+/// `None` uses the mouse position.
+pub fn shell_context_menu(hwnd: HWND, paths: &[PathBuf], client_pt: Option<(i32, i32)>, extended: bool) -> Result<MenuOutcome, String> {
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::Shell::{
+        CMF_CANRENAME, CMF_EXPLORE, CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
+        CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    };
+    use windows::core::{PCSTR, PSTR};
+    const CMIC_MASK_UNICODE: u32 = 0x4000;
+    if paths.is_empty() {
+        return Ok(MenuOutcome::Cancelled);
+    }
+    with_shell_items(paths, |folder, children| unsafe {
+        {
+            let cm: IContextMenu = folder.GetUIObjectOf(hwnd, children, None)?;
             let menu = CreatePopupMenu()?;
             let flags = CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME | if extended { CMF_EXTENDEDVERBS } else { 0 };
             cm.QueryContextMenu(menu, 0, 1, 0x7FFF, flags).ok()?;
@@ -655,10 +703,40 @@ pub fn shell_context_menu(hwnd: HWND, paths: &[PathBuf], client_pt: Option<(i32,
             };
             let _ = DestroyMenu(menu);
             Ok(outcome)
-        })();
-        for p in pidls {
-            ILFree(Some(p));
         }
-        result.map_err(|e| e.message())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_data_object_offers_file_drop_format() {
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<PathBuf> = ["a.txt", "b.txt"].iter().map(|n| dir.path().join(n)).collect();
+        for f in &files {
+            std::fs::write(f, b"x").unwrap();
+        }
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let ok = with_shell_items(&files, |folder, children| unsafe {
+            let data: IDataObject = folder.GetUIObjectOf(HWND::default(), children, None)?;
+            let fmt = FORMATETC {
+                cfFormat: CF_HDROP.0,
+                ptd: std::ptr::null_mut(),
+                dwAspect: DVASPECT_CONTENT.0,
+                lindex: -1,
+                tymed: TYMED_HGLOBAL.0 as u32,
+            };
+            Ok(data.QueryGetData(&fmt).is_ok())
+        })
+        .unwrap();
+        assert!(ok, "shell data object should offer CF_HDROP");
+        assert!(with_shell_items(&[], |_, _| Ok(())).is_err());
     }
 }

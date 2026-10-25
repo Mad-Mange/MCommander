@@ -144,6 +144,8 @@ pub struct App {
     pub context_at: Option<Pos2>,
     /// Screen rectangles of the main menu titles (for keyboard menus).
     pub menu_rects: Vec<egui::Rect>,
+    /// The OLE drag loop swallowed the mouse-up: synthesize it next frame.
+    pub release_pointer: bool,
     pub ppp: f32,
 }
 
@@ -222,6 +224,7 @@ impl App {
             frame_no: 0,
             context_at: None,
             menu_rects: Vec::new(),
+            release_pointer: false,
             ppp: 1.0,
             cfg,
         };
@@ -2274,6 +2277,11 @@ impl eframe::App for App {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if std::mem::take(&mut self.release_pointer) {
+            let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(Pos2::ZERO);
+            raw_input.events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            raw_input.events.push(Event::PointerGone);
+        }
         self.inject_steps(ctx, raw_input);
     }
 
