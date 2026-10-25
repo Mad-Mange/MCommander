@@ -43,13 +43,19 @@ If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd
 
 ## Getting started
 
-### Requirements
+### Download
+
+Grab `MCommander-0.1.0-win-x64.zip` from the [latest release](https://github.com/Mad-Mange/MCommander/releases/latest), unzip it and run `MCommander.exe`. It is a single self-contained file for Windows 10/11 x64, with nothing to install. The binary is not code-signed, so SmartScreen may ask once.
+
+### Build from source
+
+#### Requirements
 
 - Windows 10 or 11 (x64)
 - [Rust](https://rustup.rs/) stable with the MSVC toolchain
 - The Windows SDK (for `rc.exe`, which embeds the icon and manifest); it comes with Visual Studio Build Tools
 
-### Build and run
+#### Build and run
 
 ```powershell
 git clone https://github.com/Mad-Mange/MCommander.git
