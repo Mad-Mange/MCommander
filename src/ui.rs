@@ -55,6 +55,10 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     egui::CentralPanel::no_frame().show(ui, |ui| {
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, pal.face);
+        if app.cfg.show_drive_buttons {
+            // The drive bar strip runs across the whole window, as in TC.
+            ui.painter().rect_filled(Rect::from_min_size(full.min, vec2(full.width(), DRIVEBAR_H)), 0.0, pal.bar);
+        }
         // Separator under the toolbar, like the Windows toolbar edge.
         ui.painter().hline(full.x_range(), full.top(), Stroke::new(1.0, pal.border.gamma_multiply(0.5)));
         let mid_w = if app.cfg.show_middle_bar { MIDBAR_W } else { 6.0 };
@@ -122,15 +126,37 @@ fn menu_items(app: &mut App, ui: &mut Ui, items: Vec<commands::MenuItem>) {
 
 fn menu_bar(app: &mut App, ui: &mut Ui) {
     let mut rects = Vec::new();
+    let (fnt, color) = (font(app), app.pal.text);
     egui::MenuBar::new().ui(ui, |ui| {
-        for (title, items) in commands::main_menu() {
-            rects.push(ui.menu_button(title, |ui| menu_items(app, ui, items)).response.rect);
+        ui.spacing_mut().button_padding = vec2(7.0, 2.0);
+        for (i, (title, items)) in commands::main_menu().into_iter().enumerate() {
+            let label = accel_title(title, i, &fnt, color);
+            rects.push(ui.menu_button(label, |ui| menu_items(app, ui, items)).response.rect);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            rects.push(ui.menu_button("Help", |ui| menu_items(app, ui, commands::help_menu())).response.rect);
+            let label = accel_title("Help", commands::MENU_COUNT - 1, &fnt, color);
+            rects.push(ui.menu_button(label, |ui| menu_items(app, ui, commands::help_menu())).response.rect);
         });
     });
     app.menu_rects = rects;
+}
+
+/// Menu title with its Alt accelerator underlined, like Windows menus ("Sho_w").
+fn accel_title(title: &str, menu_index: usize, font: &FontId, color: Color32) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let accel = "fmcnwosh".chars().nth(menu_index).unwrap_or(' ');
+    let plain = TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let underlined = TextFormat { underline: Stroke::new(1.0, color), ..plain.clone() };
+    let mut job = LayoutJob::default();
+    match title.char_indices().find(|(_, c)| c.to_ascii_lowercase() == accel) {
+        Some((i, c)) => {
+            job.append(&title[..i], 0.0, plain.clone());
+            job.append(&title[i..i + c.len_utf8()], 0.0, underlined);
+            job.append(&title[i + c.len_utf8()..], 0.0, plain);
+        }
+        None => job.append(title, 0.0, plain),
+    }
+    job
 }
 
 // ---- toolbar ------------------------------------------------------------------------
@@ -140,7 +166,7 @@ fn tool_button(app: &mut App, ui: &mut Ui, icon: Icon, tip: &str, cmd: Cmd, on: 
 }
 
 fn tool_button_enabled(app: &mut App, ui: &mut Ui, icon: Icon, tip: &str, cmd: Cmd, on: bool, enabled: bool) {
-    let size = vec2(28.0, 28.0);
+    let size = vec2(30.0, 30.0);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
     let pal = &app.pal;
@@ -152,14 +178,14 @@ fn tool_button_enabled(app: &mut App, ui: &mut Ui, icon: Icon, tip: &str, cmd: C
     if !enabled {
         painter.multiply_opacity(0.35);
     }
-    paint_icons::paint(&painter, rect.shrink(5.0), icon, pal.text);
+    paint_icons::paint(&painter, rect.shrink(4.0), icon, pal.text);
     if resp.on_hover_text(tip).clicked() && enabled {
         app.pending.push(cmd);
     }
 }
 
 fn tool_sep(ui: &mut Ui, pal: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 28.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 30.0), Sense::hover());
     ui.painter().vline(rect.center().x, rect.y_range().shrink(3.0), Stroke::new(1.0, pal.col_sep));
 }
 
@@ -555,7 +581,7 @@ fn path_header(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     // Left: tiny triangle like TC (opens history).
     let tri = Rect::from_min_size(rect.min, vec2(14.0, rect.height()));
     let tri_resp = ui.interact(tri, egui::Id::unique(("hdrhist", side.index())), Sense::click());
-    ui.painter().text(tri.center(), Align2::CENTER_CENTER, "\u{25BE}", font(app), pal.header_text);
+    ui.painter().text(tri.center(), Align2::CENTER_CENTER, "\u{25BC}", FontId::proportional(app.cfg.font_size - 3.5), pal.header_text);
     if tri_resp.clicked() {
         app.active = side;
         app.pending.push(Cmd::HistoryMenu);

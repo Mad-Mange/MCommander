@@ -69,7 +69,7 @@ try {
   # 3. Multi-rename tool on the photos.
   Shot "light" "Wait:1500,Down,Down,Down,Down,Down,Enter,Wait:400,Ctrl+A,Ctrl+M,Wait:500,Text:Holiday_[C:3],Wait:300,Shot:$out\multi-rename.png,Exit"
   # 4. Synchronize dirs (opened from the toolbar, Compare clicked).
-  Shot "light" "Wait:1500,Click:426;40,Wait:600,Click:128;210,Wait:300,Click:262;210,Wait:1200,Shot:$out\sync.png,Exit"
+  Shot "light" "Wait:1500,Alt+C,Wait:300,Down,Down,Enter,Wait:600,Click:128;210,Wait:300,Click:262;210,Wait:1200,Shot:$out\sync.png,Exit"
   Get-ChildItem $out | Select-Object Name, Length
 }
 finally {

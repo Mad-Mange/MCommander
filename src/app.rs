@@ -1670,14 +1670,25 @@ impl App {
             return;
         }
         let in_archive = sources.iter().any(|s| matches!(s, Source::Zip { .. }));
-        let recycle = self.cfg.use_recycle_bin && !permanent && !in_archive;
-        if !self.cfg.confirm_delete {
+        // Network shares have no recycle bin: Windows would delete permanently.
+        let network = sources.iter().any(|s| match s {
+            Source::Fs(p) => {
+                let text = p.to_string_lossy();
+                let letter = text.chars().next().filter(|_| text.as_bytes().get(1) == Some(&b':')).map(|c| c.to_ascii_uppercase());
+                text.starts_with("\\\\") || letter.is_some_and(|l| self.drives.iter().any(|d| d.letter == l && d.kind == win::DriveKind::Network))
+            }
+            Source::Zip { .. } => false,
+        });
+        let recycle = self.cfg.use_recycle_bin && !permanent && !in_archive && !network;
+        if !self.cfg.confirm_delete && !(network && self.cfg.use_recycle_bin && !permanent) {
             self.start_job(OpRequest { kind: OpKind::Delete { recycle }, sources, dest: None, mask: String::new() });
             return;
         }
         let what = self.describe(side);
         let text = if recycle {
             format!("Do you really want to move {what} to the recycle bin?")
+        } else if network && !permanent && self.cfg.use_recycle_bin {
+            format!("Network drives have no recycle bin.\n\nDo you really want to PERMANENTLY delete {what}?")
         } else {
             format!("Do you really want to PERMANENTLY delete {what}?")
         };
