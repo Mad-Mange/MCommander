@@ -51,6 +51,8 @@ pub struct PopupMenu {
     pub items: Vec<PopupItem>,
     pub sel: usize,
     pub opened: Instant,
+    /// Set when the popup shows a main menu (Left/Right switch menus).
+    pub menu: Option<usize>,
 }
 
 pub struct Toast {
@@ -138,6 +140,8 @@ pub struct App {
     pub frame_no: u64,
     /// Where a pending context menu should open (pointer position, points).
     pub context_at: Option<Pos2>,
+    /// Screen rectangles of the main menu titles (for keyboard menus).
+    pub menu_rects: Vec<egui::Rect>,
     pub ppp: f32,
 }
 
@@ -215,6 +219,7 @@ impl App {
             cmd_history_popup: false,
             frame_no: 0,
             context_at: None,
+            menu_rects: Vec::new(),
             ppp: 1.0,
             cfg,
         };
@@ -684,6 +689,7 @@ impl App {
         let letters_mode = matches!(qs_mode, QuickSearchMode::Letters | QuickSearchMode::LettersDialog);
         let mut cmds = Vec::new();
         let mut eat_space = false;
+        let mut eat_alt_text: Option<char> = None;
         let mut quick_chars = String::new();
         let mut quick_back = false;
         let mut quick_nav: isize = 0;
@@ -725,6 +731,14 @@ impl App {
                             _ => close_quick = true,
                         }
                     }
+                    // Alt+letter opens the main menus (unless Alt+letters is the quick search key).
+                    if m.alt && !m.ctrl && !m.shift && qs_mode != QuickSearchMode::Alt && !quick_open {
+                        if let Some(i) = letter_of(key).and_then(crate::commands::menu_accelerator) {
+                            cmds.push(Cmd::MenuOpen(i));
+                            eat_alt_text = letter_of(key);
+                            return false;
+                        }
+                    }
                     // Ctrl+Alt+letter / Alt+letter quick search.
                     if let Some(c) = letter_of(key) {
                         let trigger = match qs_mode {
@@ -764,6 +778,10 @@ impl App {
                 Event::Text(t) => {
                     if eat_space && t == " " {
                         eat_space = false;
+                        return false;
+                    }
+                    if eat_alt_text.is_some_and(|c| t.eq_ignore_ascii_case(&c.to_string())) {
+                        eat_alt_text = None;
                         return false;
                     }
                     if quick_open && !t.is_empty() {
@@ -1549,6 +1567,7 @@ impl App {
             KeyboardHelp => self.dialog = Some(Dialog::Keyboard),
             Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Run(line) => self.run_command_line(&line, false),
+            MenuOpen(i) => self.open_main_menu(i % crate::commands::MENU_COUNT),
         }
     }
 
@@ -1916,7 +1935,28 @@ impl App {
             return;
         }
         self.quick = None;
-        self.popup = Some(PopupMenu { pos, items, sel: 0, opened: Instant::now() });
+        self.popup = Some(PopupMenu { pos, items, sel: 0, opened: Instant::now(), menu: None });
+    }
+
+    /// Shows a main menu as a keyboard-navigable popup under its title.
+    fn open_main_menu(&mut self, index: usize) {
+        let mut menus = crate::commands::main_menu();
+        let items = if index < menus.len() { menus.swap_remove(index).1 } else { crate::commands::help_menu() };
+        let items: Vec<PopupItem> = items
+            .into_iter()
+            .map(|it| match it.cmd {
+                None => PopupItem { label: String::new(), detail: String::new(), cmd: None },
+                Some(cmd) => {
+                    let mark = if crate::ui::checked(self, &cmd) == Some(true) { "\u{2714} " } else { "    " };
+                    PopupItem { label: format!("{mark}{}", it.label), detail: it.shortcut.to_string(), cmd: Some(cmd) }
+                }
+            })
+            .collect();
+        let pos = self.menu_rects.get(index).map(|r| r.left_bottom()).unwrap_or(egui::pos2(4.0, 22.0));
+        self.open_popup_at(items, pos);
+        if let Some(p) = &mut self.popup {
+            p.menu = Some(index);
+        }
     }
 
     fn open_hotlist(&mut self) {

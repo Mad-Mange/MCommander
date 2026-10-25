@@ -80,7 +80,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
 
 // ---- menu bar ---------------------------------------------------------------------
 
-fn checked(app: &App, cmd: &Cmd) -> Option<bool> {
+pub fn checked(app: &App, cmd: &Cmd) -> Option<bool> {
     let tab = app.atab();
     Some(match cmd {
         Cmd::Brief => tab.view == ViewMode::Brief,
@@ -121,14 +121,16 @@ fn menu_items(app: &mut App, ui: &mut Ui, items: Vec<commands::MenuItem>) {
 }
 
 fn menu_bar(app: &mut App, ui: &mut Ui) {
+    let mut rects = Vec::new();
     egui::MenuBar::new().ui(ui, |ui| {
         for (title, items) in commands::main_menu() {
-            ui.menu_button(title, |ui| menu_items(app, ui, items));
+            rects.push(ui.menu_button(title, |ui| menu_items(app, ui, items)).response.rect);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("Help", |ui| menu_items(app, ui, commands::help_menu()));
+            rects.push(ui.menu_button("Help", |ui| menu_items(app, ui, commands::help_menu())).response.rect);
         });
     });
+    app.menu_rects = rects;
 }
 
 // ---- toolbar ------------------------------------------------------------------------
@@ -1148,14 +1150,24 @@ pub fn draw_popup(app: &mut App, ctx: &egui::Context) {
     let fnt = FontId::proportional(app.cfg.font_size);
     let n = popup.items.len();
     // Keyboard navigation.
-    let (up, down, enter, esc) = ctx.input_mut(|i| {
+    let (up, down, enter, esc, left, right) = ctx.input_mut(|i| {
         (
             i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
             i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
             i.consume_key(egui::Modifiers::NONE, Key::Enter),
-            i.consume_key(egui::Modifiers::NONE, Key::Escape),
+            i.consume_key(egui::Modifiers::NONE, Key::Escape) || i.consume_key(egui::Modifiers::NONE, Key::F10),
+            i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft),
+            i.consume_key(egui::Modifiers::NONE, Key::ArrowRight),
         )
     });
+    // Main menus: Left/Right move to the neighbouring menu.
+    if let (Some(m), true) = (popup.menu, left || right) {
+        let n = crate::commands::MENU_COUNT;
+        let next = if right { (m + 1) % n } else { (m + n - 1) % n };
+        app.popup = None;
+        app.pending.push(Cmd::MenuOpen(next));
+        return;
+    }
     let selectable = |i: usize, items: &[crate::app::PopupItem]| items[i].cmd.is_some();
     if up || down {
         for _ in 0..n {
@@ -1184,7 +1196,12 @@ pub fn draw_popup(app: &mut App, ctx: &egui::Context) {
         .constrain_to(screen)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).fill(pal.bar).stroke(Stroke::new(1.0, pal.border)).inner_margin(3.0).show(ui, |ui| {
-                ui.set_min_width(240.0);
+                // Width from the content: longest label plus longest detail.
+                let measure = |s: &str| ui.painter().layout_no_wrap(s.to_string(), fnt.clone(), pal.text).size().x;
+                let label_w = popup.items.iter().map(|i| measure(&i.label)).fold(0.0, f32::max);
+                let detail_w = popup.items.iter().map(|i| measure(&i.detail)).fold(0.0, f32::max);
+                let width = (label_w + detail_w + 48.0).clamp(200.0, (screen.width() - 20.0).max(200.0));
+                ui.set_width(width);
                 let max_h = (screen.height() - 40.0).max(100.0);
                 egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
                     for (i, item) in popup.items.iter().enumerate() {
@@ -1193,8 +1210,7 @@ pub fn draw_popup(app: &mut App, ctx: &egui::Context) {
                             continue;
                         }
                         let h = app_row_height(&fnt);
-                        let w = ui.available_width().max(240.0);
-                        let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+                        let (r, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
                         if resp.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
                             popup.sel = i;
                         }

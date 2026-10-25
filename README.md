@@ -84,6 +84,7 @@ The release build is a single self-contained `mcommander.exe`; copy it anywhere 
 | <kbd>Alt</kbd>+<kbd>F5</kbd> / <kbd>Alt</kbd>+<kbd>F9</kbd> | Pack / unpack | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quick view panel |
 | <kbd>Alt</kbd>+<kbd>F1</kbd> / <kbd>F2</kbd> | Choose drive | <kbd>Ctrl</kbd>+<kbd>U</kbd> | Swap panels |
 | <kbd>Alt</kbd>+<kbd>F10</kbd> | Directory tree | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Branch view (all subfolder files) |
+| <kbd>F9</kbd> / <kbd>F10</kbd> | Main menu (also <kbd>Alt</kbd>+underlined letter) | <kbd>Shift</kbd>+<kbd>F10</kbd> | Explorer context menu |
 | <kbd>Alt</kbd>+<kbd>Left</kbd> / <kbd>Right</kbd> | Back / forward | <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> | File clipboard (works with Explorer) |
 
 Typing goes to the command line at the bottom (`cd`, `md`, `rd` and drive changes run internally; anything else starts in the current folder), unless you choose a letter-only quick search mode in the options, as in Total Commander.

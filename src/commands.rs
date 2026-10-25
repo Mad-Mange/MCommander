@@ -121,7 +121,27 @@ pub enum Cmd {
     Exit,
     /// Run an external command line in the active directory.
     Run(String),
+    /// Open main menu number n (0 = Files ... 7 = Help) as a keyboard menu.
+    MenuOpen(usize),
 }
+
+/// Alt+letter accelerators of the main menu titles (TC: &Files, &Mark,
+/// &Commands, &Net, Sho&w, C&onfiguration, &Start, &Help).
+pub fn menu_accelerator(c: char) -> Option<usize> {
+    Some(match c.to_ascii_lowercase() {
+        'f' => 0,
+        'm' => 1,
+        'c' => 2,
+        'n' => 3,
+        'w' => 4,
+        'o' => 5,
+        's' => 6,
+        'h' => 7,
+        _ => return None,
+    })
+}
+
+pub const MENU_COUNT: usize = 8;
 
 /// Context needed to resolve keys whose meaning depends on the command line.
 #[derive(Clone, Copy, Debug)]
@@ -198,6 +218,7 @@ pub fn map_key(key: Key, m: Modifiers, kc: KeyCtx) -> Option<Cmd> {
         Key::F7 if alt => Search,
         Key::F8 if alt => CmdHistory,
         Key::F10 if alt => CdTree,
+        Key::F9 | Key::F10 if none => MenuOpen(0),
         Key::F1 if ctrl => Brief,
         Key::F2 if ctrl => Full,
         Key::F3 if ctrl => SortBy(SortColumn::Name),
@@ -363,6 +384,7 @@ pub fn help_menu() -> Vec<MenuItem> {
 
 /// Text for the F1 keyboard reference dialog.
 pub const KEYBOARD_HELP: &[(&str, &str)] = &[
+    ("F9 / F10, Alt+F/M/C/N/W/O/S/H", "Open the main menu (arrows to navigate)"),
     ("F2 / Ctrl+R", "Reread source window"),
     ("F3", "View file (Lister)"),
     ("F4", "Edit file"),
