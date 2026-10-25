@@ -891,7 +891,11 @@ impl Worker {
             return Ok(ok);
         }
         clear_readonly(path);
-        let res = if meta.is_dir() { std::fs::remove_dir(path) } else { std::fs::remove_file(path) };
+        // Directory symlinks and junctions report is_dir() == false but must be
+        // removed with RemoveDirectory; this deletes the link, never its target.
+        use std::os::windows::fs::MetadataExt;
+        let dir_like = meta.file_attributes() & crate::format::ATTR_DIRECTORY != 0;
+        let res = if dir_like { std::fs::remove_dir(path) } else { std::fs::remove_file(path) };
         match res {
             Ok(()) => {
                 self.update(|p| p.files_done += 1);
@@ -1073,6 +1077,34 @@ mod tests {
         });
         assert!(p.errors.is_empty());
         assert!(!moved.join("src").exists());
+    }
+
+    #[test]
+    fn deleting_a_junction_keeps_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"important").unwrap();
+        let link = dir.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !made {
+            return; // Junctions unavailable (e.g. non-NTFS temp dir).
+        }
+        let p = run(OpRequest {
+            kind: OpKind::Delete { recycle: false },
+            sources: vec![Source::Fs(link.clone())],
+            dest: None,
+            mask: String::new(),
+        });
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert!(std::fs::symlink_metadata(&link).is_err(), "junction should be gone");
+        assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"important");
     }
 
     #[test]
