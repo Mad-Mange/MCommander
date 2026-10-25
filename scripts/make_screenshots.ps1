@@ -8,11 +8,11 @@
   MCommander with scripted input (--keys) and removes the mapping again.
   Requires a release build: cargo build --release
 #>
-param([string]$Drive = "X:")
+param([string]$Drive = "X:", [string]$Exe = "")
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $root "target\release\mcommander.exe"
+$exe = if ($Exe) { $Exe } else { Join-Path $root "target\release\mcommander.exe" }
 $out = Join-Path $root "docs\images"
 if (-not (Test-Path $exe)) { throw "Build first: cargo build --release" }
 New-Item -ItemType Directory -Force $out | Out-Null

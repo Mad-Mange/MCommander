@@ -45,7 +45,7 @@ If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd
 
 ### Download
 
-Grab `MCommander-0.1.0-win-x64.zip` from the [latest release](https://github.com/Mad-Mange/MCommander/releases/latest), unzip it and run `MCommander.exe`. It is a single self-contained file for Windows 10/11 x64, with nothing to install. The binary is not code-signed, so SmartScreen may ask once.
+Grab `MCommander-<version>-win-x64.zip` from the [latest release](https://github.com/Mad-Mange/MCommander/releases/latest), unzip it and run `MCommander.exe`. It is a single self-contained file for Windows 10/11 x64, with nothing to install. The binary is not code-signed, so SmartScreen may ask once.
 
 ### Build from source
 
