@@ -23,7 +23,6 @@ pub enum Icon {
     Hidden,
     Theme,
     Terminal,
-    Notepad,
     View,
     Edit,
     Copy,
@@ -35,6 +34,12 @@ pub enum Icon {
     ParentDir,
     Folder,
     File,
+    Tree,
+    Gear,
+    /// A button without a picture of its own.
+    Command,
+    /// A button that opens another bar as a menu.
+    Menu,
 }
 
 struct G {
@@ -238,14 +243,6 @@ pub fn paint(pt: &Painter, rect: Rect, icon: Icon, fg: Color32) {
             pt.line_segment([g.p(6.0, 8.5), g.p(3.5, 10.5)], g.s(1.3, Color32::from_rgb(0xD0, 0xD0, 0xD0)));
             pt.line_segment([g.p(7.5, 11.0), g.p(11.5, 11.0)], g.s(1.3, Color32::from_rgb(0xD0, 0xD0, 0xD0)));
         }
-        Icon::Notepad => {
-            page(pt, &g, 2.5, 1.0, 11.0, 14.0, paper, GREY);
-            pt.rect_filled(g.rect(2.5, 1.0, 10.0, 3.0), 0.0, LIGHT_BLUE);
-            for i in 0..4 {
-                let y = 6.0 + i as f32 * 2.2;
-                pt.line_segment([g.p(4.5, y), g.p(11.5, y)], g.s(0.8, GREY));
-            }
-        }
         Icon::View => {
             page(pt, &g, 1.0, 0.5, 10.0, 13.0, paper, GREY);
             for i in 0..3 {
@@ -314,6 +311,41 @@ pub fn paint(pt: &Painter, rect: Rect, icon: Icon, fg: Color32) {
         }
         Icon::Folder => folder(pt, &g, 0.5, 1.5, 15.0, 13.0),
         Icon::File => page(pt, &g, 2.5, 0.5, 11.0, 15.0, paper, GREY),
+        Icon::Tree => {
+            folder(pt, &g, 0.5, 0.5, 6.5, 5.0);
+            folder(pt, &g, 6.0, 5.5, 6.0, 4.5);
+            folder(pt, &g, 9.5, 11.0, 6.0, 4.5);
+            pt.line_segment([g.p(2.5, 5.5), g.p(2.5, 8.5)], g.s(0.9, GREY));
+            pt.line_segment([g.p(2.5, 8.5), g.p(6.0, 8.5)], g.s(0.9, GREY));
+            pt.line_segment([g.p(8.0, 10.0), g.p(8.0, 13.5)], g.s(0.9, GREY));
+            pt.line_segment([g.p(8.0, 13.5), g.p(9.5, 13.5)], g.s(0.9, GREY));
+        }
+        Icon::Gear => {
+            let c = g.p(8.0, 8.0);
+            let teeth: Vec<Pos2> = (0..32)
+                .map(|i| {
+                    let t = std::f32::consts::TAU * i as f32 / 32.0;
+                    let rr = if (i / 2) % 2 == 0 { 7.2 } else { 5.4 } * g.k;
+                    c + vec2(t.cos(), t.sin()) * rr
+                })
+                .collect();
+            pt.add(Shape::convex_polygon(teeth, GREY, Stroke::NONE).into_concave_fix());
+            pt.circle_filled(c, 4.6 * g.k, Color32::from_rgb(0x9A, 0x9A, 0x9A));
+            pt.circle_filled(c, 2.0 * g.k, paper);
+        }
+        Icon::Command => {
+            pt.rect(g.rect(1.5, 3.0, 14.5, 13.0), 2.0 * g.k, LIGHT_BLUE.gamma_multiply(0.35), g.s(1.0, BLUE), StrokeKind::Inside);
+            for x in [5.0, 8.0, 11.0] {
+                pt.circle_filled(g.p(x, 8.0), 1.1 * g.k, BLUE);
+            }
+        }
+        Icon::Menu => {
+            pt.rect(g.rect(1.0, 2.0, 15.0, 11.0), 1.0, paper, g.s(1.0, GREY), StrokeKind::Inside);
+            for y in [4.5, 6.8, 9.0] {
+                pt.line_segment([g.p(3.0, y), g.p(12.5, y)], g.s(0.9, BLUE));
+            }
+            pt.add(Shape::convex_polygon(vec![g.p(9.0, 12.0), g.p(15.0, 12.0), g.p(12.0, 15.5)], fg, Stroke::NONE));
+        }
     }
 }
 

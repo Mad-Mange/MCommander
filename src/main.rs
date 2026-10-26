@@ -3,6 +3,8 @@
 
 mod app;
 mod archive;
+mod bar_ui;
+mod buttonbar;
 mod commands;
 mod config;
 mod dialogs;
@@ -13,6 +15,7 @@ mod mask;
 mod ops;
 mod paint_icons;
 mod panel;
+mod params;
 mod remote;
 mod remote_ui;
 mod rename;
@@ -45,7 +48,7 @@ fn usage() -> &'static str {
      --size=WxH     initial window size\n\
      --keys=K1,K2   scripted input for tests (Down, Ctrl+F3, Text:abc, Wait:300,\n\
                     NumPlus, NumMinus, NumStar, CtrlC, CtrlV, Click:x;y, RClick:x;y,\n\
-                    RDown:x;y, Move:x;y, RUp:x;y, Shot:file.png, Exit)\n"
+                    RDown:x;y, RUp:x;y, LDown:x;y, LUp:x;y, Move:x;y, Shot:file.png, Exit)\n"
 }
 
 fn parse_step(token: &str) -> Option<Step> {
@@ -63,6 +66,8 @@ fn parse_step(token: &str) -> Option<Step> {
     use egui::PointerButton::{Primary, Secondary};
     for (prefix, button, pressed, click) in [
         ("Click:", Primary, true, true),
+        ("LDown:", Primary, true, false),
+        ("LUp:", Primary, false, false),
         ("RClick:", Secondary, true, true),
         ("RDown:", Secondary, true, false),
         ("RUp:", Secondary, false, false),

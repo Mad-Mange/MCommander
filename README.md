@@ -33,6 +33,7 @@ If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd
 - **Find files (Alt+F7)**: name masks with exclusions, content search (UTF-8, UTF-16, ANSI, regex). Results can go to the file or be fed into a panel.
 - **Multi-Rename Tool (Ctrl+M)**: `[N]`, `[E]`, `[C]`, `[P]` and date placeholders, search and replace with regex, case conversion and a live preview.
 - **Synchronize directories**: recursive compare by size and date, with a direction you can change per file and a one-click sync.
+- **Button bars you can change**: the bar under the menu and the vertical bar between the panels use Total Commander's `.bar` format, so your TC bars come along, sub-bars included. A button can run internal commands (`cm_Copy`, also several in a row), `cd` to a folder, start a program with TC's parameters (`%P%N`, `%S`, `%T`, list files with `%L`, `?` to edit them first), or open another bar as a menu. Right-click a button to change or delete it, drop files on a button to open them with its program, and drop a program on an empty spot to add it. MCommander draws its own pictures for TC's icon library and shows the real icons of programs.
 - **Windows integration**: Explorer's own context menu, shell icons, property sheets, file clipboard compatible with Explorer, and drag & drop between panels, from Explorer, and out to Explorer and other apps. Folders refresh automatically when they change, and network shares and removable drives are read in the background, so a slow share never freezes the window.
 - **Light, dark or follow Windows**, including a dark title bar, switchable at runtime.
 
@@ -105,11 +106,13 @@ Settings live in `%APPDATA%\MCommander\mcommander.ini`. On the very first start 
 
 Saved FTP/SFTP connections are part of `mcommander.ini`; their passwords are stored in the Windows Credential Manager (as `MCommander:ftp://user@host`). Trusted SSH host keys and accepted FTPS certificates are kept next to the settings in `known_hosts` and `trusted_certs`.
 
-**Configuration > Options** covers the theme (light, dark or follow Windows), font size, which window parts are visible, quick search style, recycle bin, delete confirmation, and the editor and terminal commands.
+**Configuration > Options** covers the theme (light, dark or follow Windows), font size, which window parts are visible, quick search style, mouse selection mode, recycle bin, delete confirmation, and the editor and terminal commands.
+
+The button bars are kept next to the settings as `default.bar` (under the menu) and `vertical.bar` (between the panels), in Total Commander's format. Until you change a bar, MCommander uses its built-in one. **Configuration > Button Bar...** and **Vertical Button Bar...** open the editor, as does a right-click on a bar. The import copies Total Commander's bars and fills in `%COMMANDER_PATH%`; buttons with commands MCommander doesn't have are shown greyed out.
 
 ## How it is built
 
-MCommander is about 18,000 lines of Rust (tests included) in one binary crate:
+MCommander is about 20,000 lines of Rust (tests included) in one binary crate:
 
 | Module | Responsibility |
 |---|---|
@@ -121,6 +124,7 @@ MCommander is about 18,000 lines of Rust (tests included) in one binary crate:
 | `remote/`, `remote_ui.rs` | FTP/FTPS (suppaftp + rustls) and SFTP (russh) behind one blocking interface; host key and certificate trust, saved connections, Credential Manager, the connect dialogs |
 | `viewer.rs`, `search.rs`, `rename.rs`, `sync.rs`, `tree.rs` | Lister, Find Files, Multi-Rename, Synchronize, CD tree |
 | `win.rs`, `icons.rs`, `watch.rs` | Win32: drives, shell execution, recycle bin, clipboard, context menu, icons, keyboard hook, change notifications |
+| `buttonbar.rs`, `bar_ui.rs`, `params.rs` | Button bars in TC's `.bar` format, their editor, and the `%P%N` parameter placeholders |
 | `config.rs`, `ini.rs` | Settings and the `wincmd.ini` import |
 
 The file lists are drawn row by row on egui's painter, so only visible rows cost anything. A directory with 5,000 files scrolls smoothly, and the app uses no CPU while idle.
@@ -137,7 +141,7 @@ The app accepts `--keys=` scripts for end-to-end UI checks. The steps are comma 
 
 ## Not (yet) included
 
-Coming from Total Commander, you will miss plugins (WCX/WFX/WLX/WDX), custom columns, a configurable button bar, multi-file property sheets, and updating 7z/tar archives in place (they are read-only; only ZIP can be modified). RAR archives can be read but not created. The FTP client has no proxy/firewall settings, direct server-to-server transfers (FXP) or resuming of interrupted transfers yet, and SFTP does not use Pageant or the SSH agent. Pull requests are welcome.
+Coming from Total Commander, you will miss plugins (WCX/WFX/WLX/WDX), custom columns, user-defined `em_` commands, a configurable Start menu, multi-file property sheets, and updating 7z/tar archives in place (they are read-only; only ZIP can be modified). RAR archives can be read but not created. The FTP client has no proxy/firewall settings, direct server-to-server transfers (FXP) or resuming of interrupted transfers yet, and SFTP does not use Pageant or the SSH agent. Pull requests are welcome.
 
 ## About this project
 

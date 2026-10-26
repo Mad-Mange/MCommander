@@ -6,7 +6,6 @@ use crate::config::ViewMode;
 use crate::format;
 use crate::paint_icons::{self, Icon};
 use crate::panel::{FileFilter, Side};
-use crate::theme::Palette;
 use crate::vfs::{FileEntry, Location, SortColumn};
 use egui::{Align2, Color32, CursorIcon, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
@@ -33,13 +32,14 @@ fn font(app: &App) -> FontId {
 
 pub fn draw(app: &mut App, ui: &mut Ui) {
     let pal = app.pal.clone();
+    app.bar_areas = [Rect::NOTHING; 2];
     egui::Panel::top("menubar")
         .frame(egui::Frame::new().fill(pal.bar).inner_margin(egui::Margin::symmetric(2, 1)))
         .show(ui, |ui| menu_bar(app, ui));
     if app.cfg.show_toolbar {
         egui::Panel::top("toolbar")
             .frame(egui::Frame::new().fill(pal.bar).inner_margin(egui::Margin::symmetric(4, 3)))
-            .show(ui, |ui| toolbar(app, ui));
+            .show(ui, |ui| crate::bar_ui::draw_main(app, ui));
     }
     if app.cfg.show_fkeys {
         egui::Panel::bottom("fkeys")
@@ -160,83 +160,6 @@ fn accel_title(title: &str, menu_index: usize, font: &FontId, color: Color32) ->
     job
 }
 
-// ---- toolbar ------------------------------------------------------------------------
-
-fn tool_button(app: &mut App, ui: &mut Ui, icon: Icon, tip: &str, cmd: Cmd, on: bool) {
-    tool_button_enabled(app, ui, icon, tip, cmd, on, true);
-}
-
-fn tool_button_enabled(app: &mut App, ui: &mut Ui, icon: Icon, tip: &str, cmd: Cmd, on: bool, enabled: bool) {
-    let size = vec2(30.0, 30.0);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let (rect, resp) = ui.allocate_exact_size(size, sense);
-    let pal = &app.pal;
-    if enabled && (on || resp.hovered()) {
-        let fill = if on { pal.pressed } else { pal.hover };
-        ui.painter().rect(rect, 2.0, fill, Stroke::new(1.0, pal.button_border), StrokeKind::Inside);
-    }
-    let mut painter = ui.painter().clone();
-    if !enabled {
-        painter.multiply_opacity(0.35);
-    }
-    paint_icons::paint(&painter, rect.shrink(4.0), icon, pal.text);
-    if resp.on_hover_text(tip).clicked() && enabled {
-        app.pending.push(cmd);
-    }
-}
-
-fn tool_sep(ui: &mut Ui, pal: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 30.0), Sense::hover());
-    ui.painter().vline(rect.center().x, rect.y_range().shrink(3.0), Stroke::new(1.0, pal.col_sep));
-}
-
-fn toolbar(app: &mut App, ui: &mut Ui) {
-    let pal = app.pal.clone();
-    ui.spacing_mut().item_spacing.x = 1.0;
-    ui.horizontal(|ui| {
-        let brief = app.atab().view == ViewMode::Brief;
-        tool_button(app, ui, Icon::Refresh, "Reread source (Ctrl+R)", Cmd::Reread, false);
-        tool_sep(ui, &pal);
-        let view = app.atab().view;
-        tool_button(app, ui, Icon::Brief, "Brief view (Ctrl+F1)", Cmd::Brief, brief);
-        tool_button(app, ui, Icon::Full, "Full view (Ctrl+F2)", Cmd::Full, view == ViewMode::Full);
-        tool_button(app, ui, Icon::Thumbs, "Thumbnails (Ctrl+Shift+F1)", Cmd::Thumbnails, view == ViewMode::Thumbs);
-        tool_button(app, ui, Icon::QuickView, "Quick view panel (Ctrl+Q)", Cmd::QuickView, app.quick_view);
-        tool_sep(ui, &pal);
-        let branch = app.atab().branch;
-        tool_button(app, ui, Icon::Branch, "Branch view: all files in subdirectories (Ctrl+B)", Cmd::BranchView, branch);
-        tool_sep(ui, &pal);
-        tool_button(app, ui, Icon::Invert, "Invert selection (Num *)", Cmd::InvertSelection, false);
-        tool_sep(ui, &pal);
-        let (back, fwd) = (app.atab().can_go_back(), app.atab().can_go_forward());
-        tool_button_enabled(app, ui, Icon::Back, "Back (Alt+Left)", Cmd::HistoryBack, false, back);
-        tool_button_enabled(app, ui, Icon::Forward, "Forward (Alt+Right)", Cmd::HistoryForward, false, fwd);
-        tool_sep(ui, &pal);
-        tool_button(app, ui, Icon::Pack, "Pack files (Alt+F5)", Cmd::Pack, false);
-        tool_button(app, ui, Icon::Unpack, "Unpack files (Alt+F9)", Cmd::Unpack, false);
-        tool_sep(ui, &pal);
-        tool_button(app, ui, Icon::Search, "Find files (Alt+F7)", Cmd::Search, false);
-        tool_button(app, ui, Icon::MultiRename, "Multi-rename tool (Ctrl+M)", Cmd::MultiRename, false);
-        tool_button(app, ui, Icon::Compare, "Synchronize directories", Cmd::SyncDirs, false);
-        tool_button(app, ui, Icon::CopyNames, "Copy names with path to clipboard", Cmd::CopyFullNames, false);
-        tool_sep(ui, &pal);
-        let hidden = app.cfg.show_hidden;
-        tool_button(app, ui, Icon::Hidden, "Show hidden/system files (Ctrl+H)", Cmd::ToggleHidden, hidden);
-        tool_button(app, ui, Icon::Hotlist, "Directory hotlist (Ctrl+D)", Cmd::Hotlist, false);
-        let connected = app.atab().loc.remote().is_some();
-        if connected {
-            tool_button(app, ui, Icon::Network, "Disconnect from the server (Ctrl+Shift+F)", Cmd::FtpDisconnect, true);
-        } else {
-            tool_button(app, ui, Icon::Network, "Connect to FTP/SFTP server (Ctrl+F)", Cmd::FtpConnect, false);
-        }
-        tool_sep(ui, &pal);
-        tool_button(app, ui, Icon::Terminal, "Open command prompt here", Cmd::OpenTerminal, false);
-        tool_button(app, ui, Icon::Notepad, "Notepad", Cmd::Run("notepad.exe".into()), false);
-        tool_sep(ui, &pal);
-        tool_button(app, ui, Icon::Theme, "Dark <-> normal", Cmd::ToggleTheme, false);
-    });
-}
-
 // ---- F-key bar and command line ---------------------------------------------------
 
 fn fkey_bar(app: &mut App, ui: &mut Ui) {
@@ -338,7 +261,6 @@ fn command_line(app: &mut App, ui: &mut Ui) {
 // ---- middle button bar ------------------------------------------------------------------
 
 fn middle_bar(app: &mut App, ui: &mut Ui, rect: Rect, full: Rect) {
-    let pal = app.pal.clone();
     let resp = ui.interact(rect, egui::Id::unique("divider"), Sense::click_and_drag());
     if resp.hovered() || resp.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
@@ -352,36 +274,16 @@ fn middle_bar(app: &mut App, ui: &mut Ui, rect: Rect, full: Rect) {
     if resp.double_clicked() {
         app.cfg.divider = 0.5;
     }
+    if resp.secondary_clicked() {
+        let at = resp.interact_pointer_pos().unwrap_or(rect.center());
+        crate::bar_ui::vertical_bar_menu(app, at);
+    }
     if !app.cfg.show_middle_bar {
+        app.bar_areas[1] = Rect::NOTHING;
         return;
     }
-    let mut y = rect.top() + DRIVEBAR_H + INFO_H + HEADER_H + COLHDR_H + 8.0;
-    let buttons: [Option<(Icon, &str, Cmd)>; 8] = [
-        Some((Icon::View, "View (F3)", Cmd::View)),
-        Some((Icon::Edit, "Edit (F4)", Cmd::Edit)),
-        Some((Icon::Copy, "Copy (F5)", Cmd::Copy)),
-        Some((Icon::Move, "Move/rename (F6)", Cmd::Move)),
-        None,
-        Some((Icon::Pack, "Pack (Alt+F5)", Cmd::Pack)),
-        Some((Icon::MkDir, "New folder (F7)", Cmd::MkDir)),
-        Some((Icon::Delete, "Delete (F8)", Cmd::Delete)),
-    ];
-    for b in buttons {
-        let Some((icon, tip, cmd)) = b else {
-            y += 32.0;
-            continue;
-        };
-        let r = Rect::from_center_size(pos2(rect.center().x, y + 12.0), vec2(28.0, 28.0));
-        let br = ui.interact(r, egui::Id::unique(("midbtn", tip)), Sense::click());
-        if br.hovered() {
-            ui.painter().rect(r, 2.0, pal.hover, Stroke::new(1.0, pal.button_border), StrokeKind::Inside);
-        }
-        paint_icons::paint(ui.painter(), r.shrink(5.0), icon, pal.text);
-        if br.on_hover_text(tip).clicked() {
-            app.pending.push(cmd);
-        }
-        y += 32.0;
-    }
+    let top = rect.top() + if app.cfg.show_drive_buttons { DRIVEBAR_H } else { 0.0 } + 4.0;
+    crate::bar_ui::draw_vertical(app, ui, rect, top);
 }
 
 // ---- one panel half ----------------------------------------------------------------------
@@ -968,7 +870,10 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         }
         // In the right button mode only the left button drags files.
         if resp.drag_started_by(egui::PointerButton::Primary) || (resp.drag_started() && !app.cfg.right_button_select) {
-            if let Some(i) = hit {
+            // The entry where the button went down, not where the pointer
+            // is once it has moved far enough to count as a drag.
+            let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+            if let Some(i) = index_at(origin, top) {
                 let tab = app.tab(side);
                 let e = &tab.entries[i];
                 if !e.is_parent {
@@ -1418,7 +1323,8 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
     }
     // Leaving the window hands the drag over to Windows (Explorer, browsers...).
     let active = app.drag.as_ref().is_some_and(|d| d.active);
-    if let (true, false, Some(hwnd)) = (active, released, app.hwnd) {
+    // (Not during scripted tests: their pointer is not the real cursor.)
+    if let (true, false, Some(hwnd), true) = (active, released, app.hwnd, app.steps.is_empty()) {
         if crate::win::cursor_outside(hwnd) {
             let drag = app.drag.take().unwrap();
             let tab = app.tab(drag.side);
@@ -1446,6 +1352,14 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
     let drag = app.drag.take().unwrap();
     let Some(p) = pointer.filter(|_| drag.active) else { return };
     let shift = ui.input(|i| i.modifiers.shift);
+    if app.bar_areas.iter().any(|r| r.contains(p)) {
+        // On a button bar: start the button's program with the files.
+        let tab = app.tab(drag.side);
+        let files = tab.entries.iter().filter(|e| drag.names.contains(&e.name)).filter_map(|e| tab.loc.child_path(e)).collect();
+        let ctx = ui.ctx().clone();
+        app.drop_on_bar(&ctx, p, files, shift);
+        return;
+    }
     // Drop target: a directory row under the pointer, else the panel's directory.
     let target_side = [Side::Left, Side::Right].into_iter().find(|s| app.list_rects[s.index()].contains(p));
     let Some(ts) = target_side else { return };
@@ -1492,6 +1406,11 @@ fn handle_external_drop(app: &mut App, ui: &mut Ui) {
         return;
     }
     let p = ui.input(|i| i.pointer.latest_pos());
+    if let Some(at) = p.filter(|at| app.bar_areas.iter().any(|r| r.contains(*at))) {
+        let (ctx, shift) = (ui.ctx().clone(), ui.input(|i| i.modifiers.shift));
+        app.drop_on_bar(&ctx, at, dropped, shift);
+        return;
+    }
     let side = p
         .and_then(|p| [Side::Left, Side::Right].into_iter().find(|s| app.panel_rects[s.index()].contains(p)))
         .unwrap_or(app.active);

@@ -25,8 +25,9 @@ use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_ADD, VK_CONTROL, VK_DIVIDE, VK_MENU, VK_MULTIPLY, VK_SHIFT, VK_SUBTRACT};
 use windows::Win32::UI::Shell::{
     DROPFILES, DefSubclassProc, DragQueryFileW, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI,
-    FOF_SILENT, HDROP, SHFILEINFOW, SHFILEOPSTRUCTW, SHFileOperationW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_TYPENAME,
-    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHOP_FILEPATH, SHObjectProperties, SetWindowSubclass, ShellExecuteW,
+    FOF_SILENT, HDROP, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHDefExtractIconW, SHELLEXECUTEINFOW, SHFILEINFOW,
+    SHFILEOPSTRUCTW, SHFileOperationW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHOP_FILEPATH, SHObjectProperties, SetWindowSubclass, ShellExecuteExW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, HICON, ICONINFO, SW_SHOWNORMAL, WM_CHAR, WM_DRAWITEM, WM_INITMENUPOPUP, WM_KEYDOWN,
@@ -203,9 +204,14 @@ pub struct IconImage {
 /// Small shell icon for a path. With `generic` the file is not touched and
 /// only its name/attributes decide the icon (fast, works for any extension).
 pub fn file_icon(path: &str, is_dir: bool, generic: bool) -> Option<IconImage> {
+    shell_icon(path, is_dir, generic, false)
+}
+
+/// Like [`file_icon`], optionally the large (32 px) icon.
+pub fn shell_icon(path: &str, is_dir: bool, generic: bool, large: bool) -> Option<IconImage> {
     let w = wide(path);
     let mut info = SHFILEINFOW::default();
-    let mut flags = SHGFI_ICON | SHGFI_SMALLICON;
+    let mut flags = SHGFI_ICON | if large { SHGFI_LARGEICON } else { SHGFI_SMALLICON };
     if generic {
         flags |= SHGFI_USEFILEATTRIBUTES;
     }
@@ -221,6 +227,79 @@ pub fn file_icon(path: &str, is_dir: bool, generic: bool) -> Option<IconImage> {
         let _ = DestroyIcon(info.hIcon);
     }
     img
+}
+
+/// An icon resource of an exe, dll or ico file at about `size` pixels;
+/// `index` as in ExtractIcon (negative numbers are resource ids). Other
+/// files get their large shell icon.
+pub fn extract_icon(path: &str, index: i32, size: u32) -> Option<IconImage> {
+    let w = wide(path);
+    let mut icon = HICON::default();
+    let hr = unsafe { SHDefExtractIconW(pcwstr(&w), index, 0, Some(&mut icon), None, size) };
+    if hr == windows::Win32::Foundation::S_OK && !icon.is_invalid() {
+        let img = icon_to_rgba(icon);
+        unsafe {
+            let _ = DestroyIcon(icon);
+        }
+        return img;
+    }
+    shell_icon(path, Path::new(path).is_dir(), false, true)
+}
+
+/// Number of icons in an exe, dll or ico file.
+pub fn icon_count(path: &str) -> u32 {
+    let w = wide(path);
+    unsafe { windows::Win32::UI::Shell::ExtractIconExW(pcwstr(&w), -1, None, None, 0) }
+}
+
+/// Starts a program or opens a document through the shell (`verb` "open"
+/// or "runas" for administrator rights). `show` is a SW_ value. Returns the
+/// process handle when there is one; pass it to [`delete_when_done`].
+pub fn shell_execute_ex(hwnd: Option<HWND>, verb: &str, file: &str, params: &str, dir: Option<&Path>, show: i32) -> Result<Option<isize>, String> {
+    let (verb_w, file_w, params_w) = (wide(verb), wide(file), wide(params));
+    let dir_w = dir.map(wide_path);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        // NOASYNC: otherwise the shell may finish the start asynchronously
+        // through this thread's message loop, which froze the window when a
+        // program was started right after a dialog closed.
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        hwnd: hwnd.unwrap_or_default(),
+        lpVerb: pcwstr(&verb_w),
+        lpFile: pcwstr(&file_w),
+        lpParameters: if params.is_empty() { PCWSTR::null() } else { pcwstr(&params_w) },
+        lpDirectory: dir_w.as_ref().map(|d| pcwstr(d)).unwrap_or(PCWSTR::null()),
+        nShow: show,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| e.message())?;
+    Ok((!info.hProcess.is_invalid()).then_some(info.hProcess.0 as isize))
+}
+
+/// Deletes a temporary file once the process ends (or after a minute when
+/// there is no process to wait for), and closes the process handle.
+pub fn delete_when_done(process: Option<isize>, file: PathBuf) {
+    std::thread::spawn(move || {
+        use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+        match process {
+            Some(h) => unsafe {
+                let handle = HANDLE(h as *mut c_void);
+                WaitForSingleObject(handle, INFINITE);
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+            },
+            None => std::thread::sleep(std::time::Duration::from_secs(60)),
+        }
+        let _ = std::fs::remove_file(file);
+    });
+}
+
+/// Closes a process handle from [`shell_execute_ex`] that isn't needed.
+pub fn close_process(process: Option<isize>) {
+    if let Some(h) = process {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(HANDLE(h as *mut c_void));
+        }
+    }
 }
 
 /// Pixels of a GDI bitmap as top-down BGRA.

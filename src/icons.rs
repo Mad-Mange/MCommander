@@ -15,6 +15,8 @@ struct Request {
     path: String,
     is_dir: bool,
     generic: bool,
+    /// An icon resource (index, pixel size) instead of the small shell icon.
+    resource: Option<(i32, u32)>,
 }
 
 pub struct IconCache {
@@ -39,7 +41,11 @@ impl IconCache {
                     );
                 }
                 while let Ok(r) = req_rx.recv() {
-                    let img = crate::win::file_icon(&r.path, r.is_dir, r.generic);
+                    let img = match r.resource {
+                        Some((_, size)) if r.generic => crate::win::shell_icon(&r.path, false, true, size > 16),
+                        Some((index, size)) => crate::win::extract_icon(&r.path, index, size),
+                        None => crate::win::file_icon(&r.path, r.is_dir, r.generic),
+                    };
                     if res_tx.send((r.key, img)).is_err() {
                         break;
                     }
@@ -63,13 +69,30 @@ impl IconCache {
     }
 
     fn request(&mut self, key: String, path: String, is_dir: bool, generic: bool) -> Option<egui::TextureId> {
-        if let Some(t) = self.textures.get(&key) {
+        self.send(Request { key, path, is_dir, generic, resource: None })
+    }
+
+    fn send(&mut self, r: Request) -> Option<egui::TextureId> {
+        if let Some(t) = self.textures.get(&r.key) {
             return t.as_ref().map(|t| t.id());
         }
-        if self.pending.insert(key.clone()) {
-            let _ = self.tx.send(Request { key, path, is_dir, generic });
+        if self.pending.insert(r.key.clone()) {
+            let _ = self.tx.send(r);
         }
         None
+    }
+
+    /// Icon number `index` of an exe, dll or ico file at `size` pixels (the
+    /// shell icon for other files); for button bars.
+    pub fn for_resource(&mut self, path: &Path, index: i32, size: u32) -> Option<egui::TextureId> {
+        let p = path.to_string_lossy().into_owned();
+        self.send(Request { key: format!("res:{p}|{index}|{size}"), path: p, is_dir: false, generic: false, resource: Some((index, size)) })
+    }
+
+    /// The shell icon of a file type (`ext` with or without a dot).
+    pub fn for_file_type(&mut self, ext: &str, size: u32) -> Option<egui::TextureId> {
+        let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+        self.send(Request { key: format!("type:{ext}|{size}"), path: format!("x.{ext}"), is_dir: false, generic: true, resource: Some((0, size)) })
     }
 
     /// Icon for a file list entry; `None` while loading or when unavailable.

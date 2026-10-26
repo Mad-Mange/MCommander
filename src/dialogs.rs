@@ -74,6 +74,10 @@ pub enum Dialog {
     HostKey { req: Box<crate::remote_ui::ConnectRequest>, info: crate::remote::HostKeyInfo },
     Certificate { req: Box<crate::remote_ui::ConnectRequest>, info: crate::remote::CertInfo },
     Connecting { label: String },
+    /// Change button bar.
+    BarEditor(Box<crate::bar_ui::BarEditor>),
+    /// Edit "?" parameters before a button's program starts.
+    RunParams(Box<crate::bar_ui::PendingRun>),
 }
 
 const ATTR_BITS: [(u32, &str); 4] = [
@@ -562,6 +566,8 @@ pub fn draw(app: &mut App, ctx: &Context) {
             });
             !(r || esc)
         }
+        Dialog::BarEditor(ed) => crate::bar_ui::draw_editor(app, ctx, ed),
+        Dialog::RunParams(run) => crate::bar_ui::draw_run_params(app, ctx, run),
         Dialog::Sites { .. }
         | Dialog::SiteEdit(_)
         | Dialog::QuickConnect { .. }

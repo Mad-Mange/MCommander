@@ -157,6 +157,17 @@ pub struct App {
     pub path_edit: Option<PathEdit>,
     pub drag: Option<DragState>,
     pub right_sel: Option<RightSelect>,
+    /// The bar under the menu and the vertical bar.
+    pub bars: [crate::buttonbar::ButtonBar; 2],
+    /// Where each button's picture comes from (by icon and command).
+    pub bar_icons: HashMap<(String, String), crate::buttonbar::IconSource>,
+    /// Button rectangles drawn this frame, for drops and menus.
+    pub bar_hits: Vec<(crate::buttonbar::BarKind, usize, egui::Rect)>,
+    pub bar_areas: [egui::Rect; 2],
+    /// Below the last clicked button: where a sub-bar menu opens.
+    pub bar_anchor: Option<Pos2>,
+    /// Commands waiting for a `cm_wait` in a button.
+    pub delayed: Vec<(Instant, Cmd)>,
     pub drives: Vec<win::DriveInfo>,
     drives_at: Instant,
     pub drive_extra: HashMap<char, DriveExtra>,
@@ -255,6 +266,12 @@ impl App {
             path_edit: None,
             drag: None,
             right_sel: None,
+            bars: [crate::buttonbar::ButtonBar::default_main(), crate::buttonbar::ButtonBar::default_vertical()],
+            bar_icons: HashMap::new(),
+            bar_hits: Vec::new(),
+            bar_areas: [egui::Rect::NOTHING; 2],
+            bar_anchor: None,
+            delayed: Vec::new(),
             drives: win::drives(),
             drives_at: Instant::now(),
             drive_extra: HashMap::new(),
@@ -313,7 +330,12 @@ impl App {
             app.panels[side.index()].remember_drive();
         }
         app.update_watches();
+        app.load_bars();
         if let Some(src) = app.cfg.imported_from.clone().filter(|_| !app.cfg.file.exists()) {
+            // First start: Total Commander's button bars come along.
+            if let Ok(ini) = crate::ini::Ini::load(Path::new(&src)) {
+                app.import_tc_bars(Path::new(&src), &ini);
+            }
             app.toast(format!("Imported settings from {src}"));
             let _ = app.cfg.save();
         }
@@ -1463,12 +1485,7 @@ impl App {
             DriveMenu(s) => self.open_drive_menu(s),
             GotoDrive(s, letter) => self.goto_drive(s, letter),
             GotoPath(p) => {
-                let target = PathBuf::from(vfs::expand_env(&p));
-                if target.is_dir() {
-                    self.go(side, Location::fs(target), None);
-                } else {
-                    self.error(format!("Directory not found:\n{}", target.display()));
-                }
+                self.goto_typed_path(side, &vfs::expand_env(&p));
             }
             NetworkDrives => {
                 let items = self
@@ -1862,11 +1879,13 @@ impl App {
                                 self.go(s, Location::fs(p), None);
                             }
                         }
+                        let bars = self.import_tc_bars(&path, &ini);
+                        let bars = if bars.is_empty() { String::new() } else { format!("\n- the {}", bars.join(" and the ")) };
                         self.save_config();
                         self.dialog = Some(Dialog::Message {
                             title: "Import".into(),
                             text: format!(
-                                "Imported from {}:\n\n- {} hotlist entries\n- {} command line history entries\n- {sites} new FTP connection(s)\n- panel paths, sort order, quick search mode, theme and hidden-file setting",
+                                "Imported from {}:\n\n- {} hotlist entries\n- {} command line history entries\n- {sites} new FTP connection(s){bars}\n- panel paths, sort order, quick search mode, mouse mode, theme and hidden-file setting",
                                 path.display(),
                                 self.cfg.hotlist.len(),
                                 self.cfg.cmd_history.len()
@@ -1886,6 +1905,30 @@ impl App {
             KeyboardHelp => self.dialog = Some(Dialog::Keyboard),
             Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Run(line) => self.run_command_line(&line, false),
+            RunButton { button, dropped } => self.run_button(ctx, *button, dropped),
+            ConfigureBar(kind) => {
+                let bar = self.bars[kind.index()].clone();
+                self.dialog = Some(Dialog::BarEditor(Box::new(crate::bar_ui::BarEditor::new(kind, bar, None))));
+            }
+            EditBarButton(kind, i) => {
+                let bar = self.bars[kind.index()].clone();
+                self.dialog = Some(Dialog::BarEditor(Box::new(crate::bar_ui::BarEditor::new(kind, bar, Some(i)))));
+            }
+            DeleteBarButton(kind, i) => {
+                let mut bar = self.bars[kind.index()].clone();
+                if i < bar.buttons.len() {
+                    bar.buttons.remove(i);
+                    self.set_bar(kind, bar);
+                }
+            }
+            ToggleBar(kind) => {
+                let flag = match kind {
+                    crate::buttonbar::BarKind::Main => &mut self.cfg.show_toolbar,
+                    crate::buttonbar::BarKind::Vertical => &mut self.cfg.show_middle_bar,
+                };
+                *flag = !*flag;
+                self.save_config();
+            }
             MenuOpen(i) => self.open_main_menu(i % crate::commands::MENU_COUNT),
             FtpConnect => self.dialog = Some(Dialog::Sites { sel: 0 }),
             FtpNew => self.dialog = Some(Dialog::QuickConnect { text: self.cfg.ftp_history.first().cloned().unwrap_or_default(), error: None, init: true }),
@@ -2531,6 +2574,7 @@ impl eframe::App for App {
         });
         self.poll_background(&ctx);
         self.handle_input(&ctx);
+        self.bar_hits.clear();
         crate::ui::draw(self, ui);
         crate::dialogs::draw(self, &ctx);
         crate::ui::draw_popup(self, &ctx);
@@ -2568,6 +2612,15 @@ impl eframe::App for App {
             self.cfg.search_history = s.history();
             if keep {
                 self.search = Some(s);
+            }
+        }
+        let now = Instant::now();
+        if !self.delayed.is_empty() {
+            let (due, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed).into_iter().partition(|(at, _)| *at <= now);
+            self.delayed = wait;
+            self.pending.extend(due.into_iter().map(|(_, c)| c));
+            if let Some(next) = self.delayed.iter().map(|(at, _)| *at).min() {
+                ctx.request_repaint_after(next.saturating_duration_since(now));
             }
         }
         let pending = std::mem::take(&mut self.pending);
