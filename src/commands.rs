@@ -455,6 +455,7 @@ pub const KEYBOARD_HELP: &[(&str, &str)] = &[
     ("Alt+Shift+Enter", "Calculate size of all directories"),
     ("Ctrl+Alt+Letters", "Quick search (configurable)"),
     ("Enter (command line)", "Run command; cd/md/rd handled internally"),
+    ("Click on the path line", "A folder: go there; elsewhere: type or paste a path (Enter)"),
 ];
 
 #[cfg(test)]

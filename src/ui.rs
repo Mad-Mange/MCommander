@@ -1,6 +1,6 @@
 //! Main window layout and the custom-drawn file panels.
 
-use crate::app::{App, DragState, Preview};
+use crate::app::{App, DragState, PathEdit, Preview};
 use crate::commands::{self, Cmd};
 use crate::config::ViewMode;
 use crate::format;
@@ -590,12 +590,12 @@ fn path_header(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         FileFilter::Programs => "*.exe *.com *.bat *.cmd ...".to_string(),
         FileFilter::Custom(m) => m.clone(),
     };
-    let mut text = format!("{}{}", tab.loc.display(), filter);
+    let mut suffix = filter;
     if tab.branch {
-        text.push_str("  [branch view]");
+        suffix.push_str("  [branch view]");
     }
     if let Some(q) = &tab.quick_filter {
-        text.push_str(&format!("  [filter: {q}]"));
+        suffix.push_str(&format!("  [filter: {q}]"));
     }
     // Left: tiny triangle like TC (opens history).
     let tri = Rect::from_min_size(rect.min, vec2(14.0, rect.height()));
@@ -606,35 +606,10 @@ fn path_header(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         app.pending.push(Cmd::HistoryMenu);
     }
     let text_rect = Rect::from_min_max(pos2(tri.right(), rect.top()), pos2(rect.right() - 40.0, rect.bottom()));
-    let resp = ui.interact(text_rect, egui::Id::unique(("hdrpath", side.index())), Sense::click());
-    let galley = ui.painter().layout_no_wrap(text.clone(), font(app), pal.header_text);
-    // Hovering a path component underlines it; clicking jumps there.
-    let disp = app.tab(side).loc.display();
-    let mut hover_target: Option<String> = None;
-    if let (Some(p), Location::Fs(_)) = (resp.hover_pos(), &app.tab(side).loc) {
-        let mut acc = String::new();
-        for part in disp.split_inclusive('\\') {
-            let before = ui.painter().layout_no_wrap(acc.clone(), font(app), pal.header_text).size().x;
-            acc.push_str(part);
-            let after = ui.painter().layout_no_wrap(acc.clone(), font(app), pal.header_text).size().x;
-            if p.x >= text_rect.left() + before && p.x < text_rect.left() + after {
-                ui.painter().hline(
-                    (text_rect.left() + before)..=(text_rect.left() + after - 4.0),
-                    rect.bottom() - 2.0,
-                    Stroke::new(1.0, pal.header_text),
-                );
-                hover_target = Some(acc.clone());
-            }
-        }
-    }
-    ui.painter().with_clip_rect(text_rect).galley(pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0), galley, pal.header_text);
-    if resp.clicked() {
-        app.active = side;
-        if let Some(t) = hover_target {
-            if t != disp {
-                app.pending.push(Cmd::GotoPath(t));
-            }
-        }
+    if app.path_edit.as_ref().is_some_and(|e| e.side == side) {
+        path_edit_field(app, ui, text_rect, side);
+    } else {
+        path_text(app, ui, rect, text_rect, side, suffix);
     }
     // Right: hotlist (*) and history (down arrow).
     for (i, (label, cmd, tip)) in [("*", Cmd::Hotlist, "Directory hotlist (Ctrl+D)"), ("\u{25BC}", Cmd::HistoryMenu, "History (Alt+Down)")].into_iter().enumerate() {
@@ -647,6 +622,120 @@ fn path_header(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         if b.on_hover_text(tip).clicked() {
             app.active = side;
             app.pending.push(cmd);
+        }
+    }
+}
+
+/// The current path above a file list. Hovering a folder of it underlines
+/// it and a click jumps there; a click anywhere else makes the line editable.
+fn path_text(app: &mut App, ui: &mut Ui, rect: Rect, text_rect: Rect, side: Side, suffix: String) {
+    let pal = app.pal.clone();
+    let fnt = font(app);
+    let resp = ui.interact(text_rect, egui::Id::unique(("hdrpath", side.index())), Sense::click());
+    let disp = app.tab(side).loc.display();
+    let mut parts = path_parts(&disp, matches!(app.tab(side).loc, Location::Fs(_)));
+    parts.push((suffix, None));
+    let width = |s: &str| ui.painter().layout_no_wrap(s.to_string(), fnt.clone(), pal.header_text).size().x;
+    elide_path_parts(&mut parts, text_rect.width(), width);
+    let painter = ui.painter().with_clip_rect(text_rect);
+    let hover = resp.hover_pos();
+    let mut target = None;
+    let mut x = text_rect.left();
+    for (shown, jump) in parts {
+        let galley = painter.layout_no_wrap(shown, fnt.clone(), pal.header_text);
+        let w = galley.size().x;
+        if let (Some(t), Some(p)) = (jump.filter(|t| *t != disp), hover) {
+            if p.x >= x && p.x < x + w {
+                painter.hline(x..=(x + w - 4.0), rect.bottom() - 2.0, Stroke::new(1.0, pal.header_text));
+                target = Some(t);
+            }
+        }
+        painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, pal.header_text);
+        x += w;
+    }
+    if resp.clicked() {
+        app.active = side;
+        match target {
+            Some(t) => app.pending.push(Cmd::GotoPath(t)),
+            None => {
+                app.quick = None;
+                app.path_edit = Some(PathEdit { side, text: disp, init: true });
+            }
+        }
+    }
+}
+
+/// The pieces of a displayed path with the folder each one jumps to
+/// (`c:\`, `Users\`, ...; a UNC share stays one piece). Only local folders
+/// get jump targets.
+fn path_parts(disp: &str, local: bool) -> Vec<(String, Option<String>)> {
+    if !local {
+        return vec![(disp.to_string(), None)];
+    }
+    let root = if disp.starts_with("\\\\") { disp.match_indices('\\').nth(3).map_or(disp.len(), |(i, _)| i + 1) } else { 0 };
+    let mut acc = disp[..root].to_string();
+    let mut parts = if root > 0 { vec![(acc.clone(), Some(acc.clone()))] } else { Vec::new() };
+    for part in disp[root..].split_inclusive('\\') {
+        acc.push_str(part);
+        parts.push((part.to_string(), Some(acc.clone())));
+    }
+    parts
+}
+
+/// Shortens a path that doesn't fit in `max` by replacing folders after the
+/// root with an ellipsis (`c:\…\ui\local\*.*`), so the current folder and
+/// the file mask (the last piece) stay visible.
+fn elide_path_parts(parts: &mut Vec<(String, Option<String>)>, max: f32, width: impl Fn(&str) -> f32) {
+    let total = |p: &[(String, Option<String>)]| p.iter().map(|(s, _)| width(s)).sum::<f32>();
+    if parts.len() > 3 && total(parts) > max {
+        parts.insert(1, ("\u{2026}\\".to_string(), None));
+        while parts.len() > 4 && total(parts) > max {
+            parts.remove(2);
+        }
+    }
+}
+
+/// The path line as an edit field: Enter (or the check mark) opens the typed
+/// or pasted path, Escape or a click elsewhere closes it.
+fn path_edit_field(app: &mut App, ui: &mut Ui, text_rect: Rect, side: Side) {
+    let pal = app.pal.clone();
+    let fnt = font(app);
+    let ok_rect = Rect::from_min_size(pos2(text_rect.right() - 19.0, text_rect.top()), vec2(18.0, text_rect.height()));
+    let edit_rect = Rect::from_min_max(text_rect.min, pos2(ok_rect.left() - 2.0, text_rect.bottom())).shrink2(vec2(0.0, 1.0));
+    let id = egui::Id::unique(("path-edit", side.index()));
+    // After a failed attempt the error dialog has the keyboard first.
+    let blocked = app.dialog.is_some();
+    let Some(pe) = app.path_edit.as_mut() else { return };
+    if !blocked {
+        // Requested on two frames: egui refuses focus on the frame a dialog closes.
+        crate::dialogs::focus_select_modal(ui, id, std::mem::take(&mut pe.init), 0, pe.text.chars().count());
+    }
+    let resp = ui.put(edit_rect, egui::TextEdit::singleline(&mut pe.text).id(id).font(fnt.clone()).margin(egui::Margin::symmetric(3, 0)));
+    let ok = ui.interact(ok_rect, id.with("ok"), Sense::click()).on_hover_text("Go to this path (Enter)");
+    if ok.hovered() {
+        ui.painter().rect_filled(ok_rect, 0.0, pal.hover.gamma_multiply(0.6));
+    }
+    ui.painter().text(ok_rect.center(), Align2::CENTER_CENTER, "\u{2714}", fnt, pal.header_text);
+    let lost = resp.lost_focus();
+    // Consumed, so the same Enter doesn't also close the error dialog a bad path opens.
+    let enter = lost && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+    if enter || ok.clicked() {
+        let text = pe.text.clone();
+        if app.goto_typed_path(side, &text) {
+            app.path_edit = None;
+        } else if let Some(pe) = app.path_edit.as_mut() {
+            pe.init = true;
+        }
+    } else if lost {
+        let (esc, tab, mouse, on_ok) = ui.input(|i| {
+            let mouse = i.pointer.any_pressed() || i.pointer.any_released();
+            (i.key_pressed(Key::Escape), i.key_pressed(Key::Tab), mouse, i.pointer.interact_pos().is_some_and(|p| ok_rect.contains(p)))
+        });
+        if esc || tab || (mouse && !on_ok) {
+            app.path_edit = None;
+        } else if !on_ok {
+            // Focus taken by a closing dialog or another window: keep editing.
+            pe.init = true;
         }
     }
 }
@@ -1434,4 +1523,36 @@ pub fn wheel_lines(ui: &Ui, row_h: f32, page: usize) -> isize {
 
 fn app_row_height(f: &FontId) -> f32 {
     (f.size + 8.0).round()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(parts: &[(String, Option<String>)]) -> String {
+        parts.iter().map(|(s, _)| s.as_str()).collect()
+    }
+
+    #[test]
+    fn path_line_pieces_and_ellipsis() {
+        let parts = path_parts(r"c:\Users\me\", true);
+        assert_eq!(parts, vec![(r"c:\".into(), Some(r"c:\".into())), (r"Users\".into(), Some(r"c:\Users\".into())), (r"me\".into(), Some(r"c:\Users\me\".into()))]);
+        let unc = path_parts(r"\\nas\share\photos\", true);
+        assert_eq!(unc[0], (r"\\nas\share\".into(), Some(r"\\nas\share\".into())));
+        assert_eq!(unc[1].1.as_deref(), Some(r"\\nas\share\photos\"));
+        assert_eq!(path_parts("sftp://me@nas/home/", false), vec![("sftp://me@nas/home/".into(), None)]);
+
+        let elided = |max: f32| {
+            let mut parts = path_parts(r"c:\Users\me\AppData\Local\Temp\", true);
+            parts.push(("*.*".into(), None));
+            elide_path_parts(&mut parts, max, |s: &str| s.chars().count() as f32);
+            parts
+        };
+        assert_eq!(shown(&elided(100.0)), r"c:\Users\me\AppData\Local\Temp\*.*");
+        let short = elided(20.0);
+        assert_eq!(shown(&short), "c:\\\u{2026}\\Local\\Temp\\*.*");
+        assert_eq!(short[1].1, None);
+        assert_eq!(short[2].1.as_deref(), Some(r"c:\Users\me\AppData\Local\"));
+        assert_eq!(shown(&elided(5.0)), "c:\\\u{2026}\\Temp\\*.*");
+    }
 }

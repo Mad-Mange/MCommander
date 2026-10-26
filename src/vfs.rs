@@ -505,6 +505,25 @@ pub fn resolve_input_path(base: &Path, input: &str) -> PathBuf {
     clean_path(&p)
 }
 
+/// Cleans up a path pasted into the path line: drops the quotes of
+/// Explorer's "Copy as path" and a trailing file mask such as `*.*`.
+pub fn strip_path_mask(input: &str) -> &str {
+    let s = input.trim().trim_matches('"').trim();
+    let last = s.rfind(['\\', '/']).map_or(0, |i| i + 1);
+    if s[last..].contains(['*', '?']) { &s[..last] } else { s }
+}
+
+/// Splits a path that leads into an archive (`d:\x\a.zip\sub`) into the
+/// archive file and the folder inside it (`sub`, empty for the root).
+pub fn split_archive_path(p: &Path) -> Option<(PathBuf, String)> {
+    let archive = p.ancestors().find(|a| a.is_file())?;
+    if !crate::archive::is_archive_name(&archive.to_string_lossy()) {
+        return None;
+    }
+    let inner = p.strip_prefix(archive).ok()?.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    Some((archive.to_path_buf(), inner))
+}
+
 /// Lexically resolves `.` and `..` components.
 pub fn clean_path(p: &Path) -> PathBuf {
     use std::path::Component;
@@ -628,6 +647,23 @@ mod tests {
         assert_eq!(resolve_input_path(base, "src"), PathBuf::from(r"d:\Work\MCommander\src"));
         assert_eq!(resolve_input_path(base, r"\Windows"), PathBuf::from(r"d:\Windows"));
         assert_eq!(resolve_input_path(base, r"e:\x\..\y"), PathBuf::from(r"e:\y"));
+    }
+
+    #[test]
+    fn pasted_paths() {
+        assert_eq!(strip_path_mask(r#"  "c:\Users\me\Downloads"  "#), r"c:\Users\me\Downloads");
+        assert_eq!(strip_path_mask(r"c:\Users\me\Downloads\*.*"), r"c:\Users\me\Downloads\");
+        assert_eq!(strip_path_mask(r"d:\src\*.rs"), r"d:\src\");
+        assert_eq!(strip_path_mask("sftp://me@nas/home/me/"), "sftp://me@nas/home/me/");
+
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("a.zip");
+        std::fs::write(&zip, b"PK").unwrap();
+        std::fs::write(dir.path().join("plain.txt"), b"x").unwrap();
+        assert_eq!(split_archive_path(&zip), Some((zip.clone(), String::new())));
+        assert_eq!(split_archive_path(&zip.join("sub").join("deeper")), Some((zip.clone(), "sub/deeper".into())));
+        assert_eq!(split_archive_path(&dir.path().join("plain.txt").join("x")), None);
+        assert_eq!(split_archive_path(&dir.path().join("missing")), None);
     }
 
     #[test]

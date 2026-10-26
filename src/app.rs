@@ -33,6 +33,14 @@ pub struct InlineRename {
     pub init: bool,
 }
 
+/// The path line above a file list while it is edited (click beside the path).
+pub struct PathEdit {
+    pub side: Side,
+    pub text: String,
+    /// Focus the field and select its text on the next frame.
+    pub init: bool,
+}
+
 pub struct DragState {
     pub side: Side,
     pub names: Vec<String>,
@@ -126,6 +134,7 @@ pub struct App {
     pub search: Option<crate::search::SearchHandle>,
     pub quick: Option<QuickSearch>,
     pub rename: Option<InlineRename>,
+    pub path_edit: Option<PathEdit>,
     pub drag: Option<DragState>,
     pub drives: Vec<win::DriveInfo>,
     drives_at: Instant,
@@ -221,6 +230,7 @@ impl App {
             search: None,
             quick: None,
             rename: None,
+            path_edit: None,
             drag: None,
             drives: win::drives(),
             drives_at: Instant::now(),
@@ -319,7 +329,7 @@ impl App {
     }
 
     pub fn panel_keys_active(&self) -> bool {
-        self.dialog.is_none() && self.popup.is_none() && self.rename.is_none() && !self.jobs.iter().any(|j| !j.background)
+        self.dialog.is_none() && self.popup.is_none() && self.rename.is_none() && self.path_edit.is_none() && !self.jobs.iter().any(|j| !j.background)
     }
 
     // ---- navigation ---------------------------------------------------------
@@ -1178,6 +1188,54 @@ impl App {
         if let Err(e) = result {
             self.error(format!("Could not run \"{line}\":\n{e}"));
         }
+    }
+
+    /// Opens a path typed or pasted into the path line: a folder, a folder in
+    /// an archive, a file (the cursor goes to it) or a server URL. Returns
+    /// false when it can't be opened, so the field stays open like in TC.
+    pub fn goto_typed_path(&mut self, side: Side, input: &str) -> bool {
+        let text = vfs::strip_path_mask(input);
+        if text.is_empty() {
+            return true;
+        }
+        self.active = side;
+        if let Some((conn, dir)) = self.tab(side).loc.remote().map(|(c, d)| (c.clone(), d.to_string())) {
+            // A path on the same server, with or without its URL prefix.
+            let prefix = conn.url_prefix();
+            let rest = match text.get(..prefix.len()) {
+                Some(p) if p.eq_ignore_ascii_case(&prefix) => Some(&text[prefix.len()..]),
+                _ if !text.contains(':') && !text.starts_with("\\\\") => Some(text),
+                _ => None,
+            };
+            if let Some(rest) = rest {
+                let path = crate::remote::normalize(&rest.replace('\\', "/"), &dir);
+                self.go(side, Location::Remote { conn, path }, None);
+                return true;
+            }
+        }
+        if text.contains("://") {
+            return match self.connect_url(text) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.error(e);
+                    false
+                }
+            };
+        }
+        let base = self.tab(side).loc.host_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
+        let target = vfs::resolve_input_path(&base, text);
+        if target.is_dir() {
+            self.go(side, Location::fs(target), None);
+        } else if let Some((archive, inner)) = vfs::split_archive_path(&target) {
+            self.go(side, Location::Archive { archive, inner }, None);
+        } else if let (true, Some(dir), Some(name)) = (target.is_file(), target.parent(), target.file_name()) {
+            let name = name.to_string_lossy().into_owned();
+            self.go(side, Location::fs(dir.to_path_buf()), Some(&name));
+        } else {
+            self.error(format!("Directory not found:\n{}", target.display()));
+            return false;
+        }
+        true
     }
 
     // ---- scripted input (tests) ------------------------------------------------------
