@@ -108,6 +108,10 @@ pub struct Config {
     pub select_history: Vec<String>,
     pub search_history: Vec<String>,
     pub imported_from: Option<String>,
+    /// Saved FTP/SFTP connections.
+    pub sites: Vec<crate::remote::sites::Site>,
+    /// URLs typed into "new connection".
+    pub ftp_history: Vec<String>,
 }
 
 pub const MAX_HISTORY: usize = 30;
@@ -146,6 +150,8 @@ impl Default for Config {
             select_history: vec!["*.*".into()],
             search_history: Vec::new(),
             imported_from: None,
+            sites: Vec::new(),
+            ftp_history: Vec::new(),
         }
     }
 }
@@ -203,6 +209,9 @@ impl Config {
                 c.import_tc(&ini);
                 c.imported_from = Some(tc.to_string_lossy().into_owned());
             }
+        }
+        if let Some(ftp) = crate::remote::sites::find_tc_ftp_ini().and_then(|p| Ini::load(&p).ok()) {
+            c.sites = crate::remote::sites::import_tc(&ftp);
         }
         c
     }
@@ -307,6 +316,8 @@ impl Config {
             },
             search_history: list("SearchHistory"),
             imported_from: ini.get("Configuration", "ImportedFrom").map(str::to_string),
+            sites: crate::remote::sites::from_ini(ini),
+            ftp_history: list("FtpHistory"),
         }
     }
 
@@ -370,11 +381,13 @@ impl Config {
             ("CmdHistory", &self.cmd_history),
             ("SelectHistory", &self.select_history),
             ("SearchHistory", &self.search_history),
+            ("FtpHistory", &self.ftp_history),
         ] {
             for (i, v) in list.iter().take(MAX_HISTORY).enumerate() {
                 ini.set(sec, &i.to_string(), v);
             }
         }
+        crate::remote::sites::to_ini(&mut ini, &self.sites);
         ini
     }
 

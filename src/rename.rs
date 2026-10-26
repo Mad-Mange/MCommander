@@ -452,6 +452,7 @@ mod tests {
             dir_size: None,
             full_path: None,
             display: None,
+            mode: None,
         }
     }
 

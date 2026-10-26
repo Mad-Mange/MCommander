@@ -21,12 +21,13 @@ Total Commander's workflow and key layout, rebuilt from scratch, with light and 
 
 ## Why MCommander?
 
-If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd> and <kbd>Num +</kbd>, MCommander will feel at home on the first keystroke. It reads your existing Total Commander `wincmd.ini` on first start, so your directory hotlist, command-line history, panel paths, sort order and quick-search style come along.
+If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd> and <kbd>Num +</kbd>, MCommander will feel at home on the first keystroke. It reads your existing Total Commander `wincmd.ini` on first start, so your directory hotlist, command-line history, panel paths, sort order, quick-search style and saved FTP connections come along.
 
 - **Two panels with folder tabs**: full, brief and thumbnail views (Explorer's previews of photos, videos and documents), sortable and resizable columns, history, hotlist and drive buttons.
 - **The Total Commander keyboard layout**: F-keys, Num +/-/\*, Ctrl+Alt quick search (or letter-only, as in TC), Ctrl+Left/Right, Ctrl+U and the rest. Press <kbd>F1</kbd> in the app for the full list.
 - **Background file operations**: copy, move, delete (recycle bin or permanent) and rename on the fly with masks such as `*.bak`. They show progress, speed, cancel and an overwrite dialog (overwrite / skip / older / auto-rename, each with an "all" variant).
 - **Archives open like folders**: ZIP, 7z, RAR and tar (plain, .gz, .xz, .bz2, .zst). Browse with Enter, copy files out, unpack (Alt+F9) and test. You can also pack (Alt+F5) to ZIP, 7z or tar.gz/xz/bz2. ZIP archives can additionally be edited in place: copy files in, delete inside. Everything runs in-process with exact Unicode names, without needing 7-Zip.
+- **FTP, FTPS and SFTP**: <kbd>Ctrl</kbd>+<kbd>F</kbd> opens your saved connections, <kbd>Ctrl</kbd>+<kbd>N</kbd> connects to a host or URL such as `sftp://me@nas/home/me`, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> disconnects. A server shows up in a panel like a folder: copy and move in both directions (whole folder trees, with progress and the overwrite dialog), rename, create folders, delete, view (F3) and edit (F4; the file is uploaded again when you save it). Transfers use their own connection, so you can keep browsing. Passwords are kept in the Windows Credential Manager. SFTP host keys are checked against `known_hosts` (MCommander's own and `~/.ssh/known_hosts`), and FTPS certificates against the Windows certificate store, and you are asked before an unknown key or a self-signed certificate is trusted. SFTP logs in with your `~/.ssh` keys, a key file or a password. FTP supports passive and active mode, MLSD and Unix/Windows listings.
 - **Lister (F3)**: text with encoding detection, wrap and search, plus hex for any size and an image view. N/P step to the next or previous file.
 - **Find files (Alt+F7)**: name masks with exclusions, content search (UTF-8, UTF-16, ANSI, regex). Results can go to the file or be fed into a panel.
 - **Multi-Rename Tool (Ctrl+M)**: `[N]`, `[E]`, `[C]`, `[P]` and date placeholders, search and replace with regex, case conversion and a live preview.
@@ -93,26 +94,30 @@ The release build is a single self-contained `mcommander.exe`; copy it anywhere 
 | <kbd>Alt</kbd>+<kbd>F10</kbd> | Directory tree | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Branch view (all subfolder files) |
 | <kbd>F9</kbd> / <kbd>F10</kbd> | Main menu (also <kbd>Alt</kbd>+underlined letter) | <kbd>Shift</kbd>+<kbd>F10</kbd> | Explorer context menu |
 | <kbd>Alt</kbd>+<kbd>Left</kbd> / <kbd>Right</kbd> | Back / forward | <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> | File clipboard (works with Explorer) |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> | Connect to a saved FTP/SFTP server | <kbd>Ctrl</kbd>+<kbd>N</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> | New connection by URL / disconnect |
 
 Typing goes to the command line at the bottom (`cd`, `md`, `rd` and drive changes run internally; anything else starts in the current folder), unless you choose a letter-only quick search mode in the options, as in Total Commander.
 
 ## Settings
 
-Settings live in `%APPDATA%\MCommander\mcommander.ini`. On the very first start MCommander looks for Total Commander's `wincmd.ini` (in `%COMMANDER_INI%`, `%APPDATA%\GHISLER` or the TC folder) and imports the parts that map one-to-one. You can import again at any time with **Configuration > Import Total Commander Settings**. MCommander never writes to Total Commander's files.
+Settings live in `%APPDATA%\MCommander\mcommander.ini`. On the very first start MCommander looks for Total Commander's `wincmd.ini` (in `%COMMANDER_INI%`, `%APPDATA%\GHISLER` or the TC folder) and imports the parts that map one-to-one, plus the connections in `wcx_ftp.ini` (without passwords, which TC only scrambles). You can import again at any time with **Configuration > Import Total Commander Settings**, or **Import from TC** in the connection dialog. MCommander never writes to Total Commander's files.
+
+Saved FTP/SFTP connections are part of `mcommander.ini`; their passwords are stored in the Windows Credential Manager (as `MCommander:ftp://user@host`). Trusted SSH host keys and accepted FTPS certificates are kept next to the settings in `known_hosts` and `trusted_certs`.
 
 **Configuration > Options** covers the theme (light, dark or follow Windows), font size, which window parts are visible, quick search style, recycle bin, delete confirmation, and the editor and terminal commands.
 
 ## How it is built
 
-MCommander is about 12,000 lines of Rust (tests included) in one binary crate:
+MCommander is about 18,000 lines of Rust (tests included) in one binary crate:
 
 | Module | Responsibility |
 |---|---|
 | `app.rs`, `commands.rs` | Application state, input routing and the command dispatcher (the equivalent of TC's `cm_*` commands) |
 | `ui.rs`, `dialogs.rs`, `paint_icons.rs`, `theme.rs` | Custom-drawn panels with egui, modal dialogs, vector toolbar icons and the light/dark palettes |
-| `panel.rs`, `vfs.rs` | Tabs, cursor, selection and history; local, archive and search-result locations; sorting |
+| `panel.rs`, `vfs.rs` | Tabs, cursor, selection and history; local, archive, server and search-result locations; sorting |
 | `archive.rs` | ZIP (read/write), 7z, tar.* (read/create) and RAR (read) behind one entry iterator |
-| `ops.rs` | Copy/move/delete/pack jobs on worker threads (`CopyFileExW` with progress and cancel) |
+| `ops/` | Copy/move/delete/pack jobs on worker threads (`CopyFileExW` with progress and cancel), uploads, downloads and server-side operations |
+| `remote/`, `remote_ui.rs` | FTP/FTPS (suppaftp + rustls) and SFTP (russh) behind one blocking interface; host key and certificate trust, saved connections, Credential Manager, the connect dialogs |
 | `viewer.rs`, `search.rs`, `rename.rs`, `sync.rs`, `tree.rs` | Lister, Find Files, Multi-Rename, Synchronize, CD tree |
 | `win.rs`, `icons.rs`, `watch.rs` | Win32: drives, shell execution, recycle bin, clipboard, context menu, icons, keyboard hook, change notifications |
 | `config.rs`, `ini.rs` | Settings and the `wincmd.ini` import |
@@ -122,15 +127,16 @@ The file lists are drawn row by row on egui's painter, so only visible rows cost
 ## Testing
 
 ```powershell
-cargo test                                         # unit and integration tests (real temp folders and ZIPs)
+cargo test                                         # unit and integration tests (real temp folders, archives and local FTP/FTPS/SFTP servers)
 powershell -File scripts\make_screenshots.ps1      # regenerates the screenshots above via scripted UI input
+cargo run --example test_servers                   # local FTP (2121), FTPS (2122) and SFTP (2222, demo/demo) servers to try the client
 ```
 
 The app accepts `--keys=` scripts for end-to-end UI checks. The steps are comma separated: key names such as `F5`, `Ctrl+F3` or `Alt+Shift+F9`, plus `Text:abc`, `Click:x;y`, `NumPlus`, `CtrlV`, `Wait:300`, `Shot:file.png` (main window), `ShotChild:file.png` (Lister), `ShotSearch:file.png` and `Exit`.
 
 ## Not (yet) included
 
-Coming from Total Commander, you will miss FTP/SFTP, plugins (WCX/WFX/WLX/WDX), custom columns, a configurable button bar, multi-file property sheets, and updating 7z/tar archives in place (they are read-only; only ZIP can be modified). RAR archives can be read but not created. Pull requests are welcome.
+Coming from Total Commander, you will miss plugins (WCX/WFX/WLX/WDX), custom columns, a configurable button bar, multi-file property sheets, and updating 7z/tar archives in place (they are read-only; only ZIP can be modified). RAR archives can be read but not created. The FTP client has no proxy/firewall settings, direct server-to-server transfers (FXP) or resuming of interrupted transfers yet, and SFTP does not use Pageant or the SSH agent. Pull requests are welcome.
 
 ## About this project
 

@@ -4,8 +4,8 @@
 1 24 "mcommander.exe.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,2,0,0
-PRODUCTVERSION 0,2,0,0
+FILEVERSION 0,3,0,0
+PRODUCTVERSION 0,3,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,12 +15,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Mad-Mange"
       VALUE "FileDescription", "MCommander file manager"
-      VALUE "FileVersion", "0.2.0"
+      VALUE "FileVersion", "0.3.0"
       VALUE "InternalName", "MCommander"
       VALUE "LegalCopyright", "MIT License"
       VALUE "OriginalFilename", "MCommander.exe"
       VALUE "ProductName", "MCommander"
-      VALUE "ProductVersion", "0.2.0"
+      VALUE "ProductVersion", "0.3.0"
     END
   END
   BLOCK "VarFileInfo"

@@ -11,7 +11,7 @@ use crate::vfs::{self, FileEntry, ListOptions, Location, SortColumn, SortSpec};
 use crate::watch::DirWatcher;
 use crate::win;
 use egui::{Event, Key, Modifiers, Pos2};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,8 +73,16 @@ pub enum BgMsg {
     Occupied { bytes: u64, files: u64, dirs: u64 },
     Message { title: String, text: String, error: bool },
     Refresh,
-    /// A background directory listing finished (slow drives).
+    /// A background directory listing finished (slow drives, servers).
     Listed { tab_id: u64, loc: Location, listing: crate::panel::Listing, focus: Option<String>, refresh: bool },
+    /// A connection attempt finished (session and login directory).
+    Connected {
+        attempt: u64,
+        req: Box<crate::remote_ui::ConnectRequest>,
+        result: Result<(Box<dyn crate::remote::RemoteFs>, String), crate::remote::ConnectError>,
+    },
+    /// A quick server command (rename, make directory) finished.
+    RemoteDone { side: Side, focus: Option<String>, error: Option<String> },
 }
 
 pub enum Preview {
@@ -148,6 +156,18 @@ pub struct App {
     /// The OLE drag loop swallowed the mouse-up: synthesize it next frame.
     pub release_pointer: bool,
     pub ppp: f32,
+    /// Id of the connection attempt in progress (results of others are dropped).
+    pub connecting: Option<u64>,
+    pub connect_attempt: u64,
+    /// Connections made with Ctrl+N (offered for saving on disconnect).
+    pub adhoc_conns: HashSet<u64>,
+    /// Server files being edited locally (uploaded back when saved).
+    pub remote_edits: Vec<crate::remote_ui::RemoteEdit>,
+    pub edits_checked: Instant,
+    /// What to do when a job finishes (open a downloaded file, ...).
+    pub job_after: HashMap<u64, crate::remote_ui::After>,
+    /// Entry to put the cursor on after the next re-read of a panel.
+    pub refresh_focus: Option<(Side, String)>,
 }
 
 pub struct Options {
@@ -228,6 +248,13 @@ impl App {
             menu_rects: Vec::new(),
             release_pointer: false,
             ppp: 1.0,
+            connecting: None,
+            connect_attempt: 0,
+            adhoc_conns: HashSet::new(),
+            remote_edits: Vec::new(),
+            edits_checked: Instant::now(),
+            job_after: HashMap::new(),
+            refresh_focus: None,
             cfg,
         };
         let lo = app.list_opts();
@@ -300,6 +327,9 @@ impl App {
     /// Locations whose listing may take long (network shares, removable and
     /// optical drives); these are read on a worker thread.
     pub fn is_slow(&self, loc: &Location) -> bool {
+        if let Location::Remote { .. } = loc {
+            return true;
+        }
         let Location::Fs(p) = loc else { return false };
         if p.to_string_lossy().starts_with("\\\\") {
             return true;
@@ -313,7 +343,9 @@ impl App {
 
     /// Reads `loc` for tab `index` of `side` in the background.
     pub fn spawn_listing(&mut self, side: Side, index: usize, loc: Location, focus: Option<String>, refresh: bool) {
-        let Location::Fs(path) = loc.clone() else { return };
+        if !matches!(loc, Location::Fs(_) | Location::Remote { .. }) {
+            return;
+        }
         let opts = self.list_opts();
         let tab = &mut self.panels[side.index()].tabs[index];
         let branch = tab.branch && loc == tab.loc;
@@ -322,7 +354,11 @@ impl App {
         let tx = self.bg_tx.clone();
         let ctx = self.ctx_clone();
         std::thread::spawn(move || {
-            let listing = crate::panel::read_fs(&path, branch, opts);
+            let listing = match &loc {
+                Location::Remote { conn, path } => crate::panel::read_remote(conn, path, opts),
+                Location::Fs(path) => crate::panel::read_fs(path, branch, opts),
+                _ => return,
+            };
             let _ = tx.send(BgMsg::Listed { tab_id, loc, listing, focus, refresh });
             ctx.request_repaint();
         });
@@ -339,12 +375,23 @@ impl App {
             tab.loading = None;
             if refresh {
                 tab.finish_refresh(listing, lo, &mut self.zips);
-            } else if let Err(e) = tab.finish_go(loc, listing, focus.as_deref()) {
-                if tab.entries.is_empty() {
-                    // Nothing shown yet (startup): fall back to the system drive.
-                    let _ = tab.go(Location::fs("C:\\"), None, lo, &mut self.zips);
+            } else {
+                let history = tab.pending_history.take();
+                match tab.finish_go(loc, listing, focus.as_deref()) {
+                    Ok(()) => {
+                        if let Some((h, pos)) = history {
+                            tab.history = h;
+                            tab.hist_pos = pos;
+                        }
+                    }
+                    Err(e) => {
+                        if tab.entries.is_empty() {
+                            // Nothing shown yet (startup): fall back to the system drive.
+                            let _ = tab.go(Location::fs("C:\\"), None, lo, &mut self.zips);
+                        }
+                        failed = Some(e);
+                    }
                 }
-                failed = Some(e);
             }
             self.panels[side.index()].remember_drive();
             break;
@@ -467,11 +514,18 @@ impl App {
                     self.shell_open(&p);
                 }
             }
+            Location::Remote { .. } => self.fetch_then(side, index, "open"),
             Location::Results { .. } => {}
         }
     }
 
-    fn shell_open(&mut self, path: &Path) {
+    pub fn open_viewer(&mut self, path: PathBuf) {
+        let id = self.next_viewer;
+        self.next_viewer += 1;
+        self.viewers.push(crate::viewer::ViewerWindow::open(id, path, &self.pal));
+    }
+
+    pub fn shell_open(&mut self, path: &Path) {
         if let Err(e) = win::shell_open(path, path.parent()) {
             self.error(format!("{}\n\n{e}", path.display()));
         }
@@ -492,11 +546,25 @@ impl App {
 
     fn history_step(&mut self, side: Side, delta: isize) {
         let lo = self.list_opts();
-        let tab = self.panels[side.index()].tab_mut();
-        let pos = tab.hist_pos as isize + delta;
-        if pos < 0 || pos as usize >= tab.history.len() {
+        let target = {
+            let tab = self.panels[side.index()].tab();
+            let pos = tab.hist_pos as isize + delta;
+            if pos < 0 || pos as usize >= tab.history.len() {
+                return;
+            }
+            (pos as usize, tab.history[pos as usize].clone())
+        };
+        if self.is_slow(&target.1) {
+            // Read in the background; the history is restored afterwards.
+            let index = self.panels[side.index()].active;
+            let tab = self.panels[side.index()].tab_mut();
+            let focus = tab.loc.parent().filter(|(p, _)| *p == target.1).map(|(_, n)| n);
+            tab.pending_history = Some((tab.history.clone(), target.0));
+            self.spawn_listing(side, index, target.1, focus, false);
             return;
         }
+        let tab = self.panels[side.index()].tab_mut();
+        let pos = tab.hist_pos as isize + delta;
         if let Err(e) = tab.history_jump(pos as usize, lo, &mut self.zips) {
             self.error(e);
         }
@@ -544,6 +612,14 @@ impl App {
                         inner: tab.loc.inner_path(&e.name)?,
                         is_dir: e.is_dir,
                     }),
+                    Location::Remote { conn, path } => Some(Source::Remote {
+                        conn: conn.clone(),
+                        path: crate::remote::join(path, &e.name),
+                        is_dir: e.is_dir,
+                        is_link: e.is_link(),
+                        size: e.size,
+                        modified: e.modified,
+                    }),
                     Location::Results { .. } => None,
                 }
             })
@@ -563,7 +639,8 @@ impl App {
         }
     }
 
-    pub fn start_job(&mut self, req: OpRequest) {
+    /// Starts a background file operation; returns its id.
+    pub fn start_job(&mut self, req: OpRequest) -> u64 {
         for side in [Side::Left, Side::Right] {
             self.tab_mut(side).save_selection();
         }
@@ -572,6 +649,7 @@ impl App {
         // Stop watching while a big operation floods change notifications;
         // panels are refreshed when the job finishes.
         self.jobs.push(Job::start(id, req, self.ctx_clone()));
+        id
     }
 
     fn ctx_clone(&self) -> egui::Context {
@@ -591,6 +669,12 @@ impl App {
             // Unselect what was processed, in whichever panel shows the sources.
             for side in [Side::Left, Side::Right] {
                 self.tab_mut(side).unselect_names(&p.done_sources);
+            }
+            let after = self.job_after.remove(&job.id);
+            if let (Some(after), true) = (after, p.errors.is_empty() && !p.cancelled) {
+                // A temporary download for viewing: nothing to refresh.
+                self.run_after(after);
+                continue;
             }
             self.refresh_all();
             if !p.errors.is_empty() {
@@ -669,6 +753,24 @@ impl App {
                 }
                 BgMsg::Refresh => self.refresh_all(),
                 BgMsg::Listed { tab_id, loc, listing, focus, refresh } => self.finish_listing(tab_id, loc, listing, focus, refresh),
+                BgMsg::Connected { attempt, req, result } => self.finish_connect(attempt, *req, result),
+                BgMsg::RemoteDone { side, focus, error } => {
+                    if let Some(e) = error {
+                        self.error(e);
+                    }
+                    self.refresh_focus = focus.map(|f| (side, f));
+                    self.refresh(side);
+                }
+            }
+        }
+        self.check_remote_edits();
+        if let Some((side, name)) = self.refresh_focus.clone() {
+            // Select the renamed/created entry once the re-read arrived.
+            if self.tab(side).loading.is_none() {
+                self.refresh_focus = None;
+                if let Some(i) = self.tab(side).index_of(&name) {
+                    self.tab_mut(side).set_cursor(i);
+                }
             }
         }
         if self.drives_at.elapsed() > Duration::from_secs(2) {
@@ -981,6 +1083,20 @@ impl App {
             return;
         }
         Config::push_history(&mut self.cfg.cmd_history, line);
+        if let Some((conn, dir)) = self.atab().loc.remote().map(|(c, d)| (c.clone(), d.to_string())) {
+            // On a server only "cd" works, like in Total Commander.
+            let lower = line.to_lowercase();
+            match lower.strip_prefix("cd").filter(|r| r.is_empty() || r.starts_with([' ', '/', '.'])) {
+                Some(_) => {
+                    let arg = line[2..].trim();
+                    let target = if arg.is_empty() { "/".to_string() } else { crate::remote::normalize(&arg.replace('\\', "/"), &dir) };
+                    let side = self.active;
+                    self.go(side, Location::Remote { conn, path: target }, None);
+                }
+                None => self.error("Only \"cd <path>\" is available on the command line while connected to a server."),
+            }
+            return;
+        }
         let Some(cwd) = self.atab().loc.host_dir() else {
             self.error("The command line needs a real directory in the active panel.");
             return;
@@ -1132,6 +1248,10 @@ impl App {
                 .iter()
                 .map(|t| match &t.loc {
                     Location::Fs(p) => p.to_string_lossy().into_owned(),
+                    // Server connections aren't restored; keep the last local folder.
+                    Location::Remote { .. } => Panel::last_local(t)
+                        .and_then(|l| l.fs_path().map(|p| p.to_string_lossy().into_owned()))
+                        .unwrap_or_else(|| "C:\\".into()),
                     other => other.host_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "C:\\".into()),
                 })
                 .collect();
@@ -1200,6 +1320,10 @@ impl App {
             }
             OpenShell => {
                 let c = self.atab().cursor;
+                if self.atab().loc.remote().is_some() {
+                    self.fetch_then(side, c, "open");
+                    return;
+                }
                 if let Some(p) = self.materialize(side, c) {
                     let is_dir = self.atab().entries.get(c).is_some_and(|e| e.is_dir);
                     if is_dir || crate::archive::is_archive_name(&p.to_string_lossy()) {
@@ -1345,7 +1469,15 @@ impl App {
             NewTab => {
                 let t = self.atab();
                 let mut nt = Tab::new(t.loc.clone(), t.sort, t.view);
-                let _ = nt.go(t.loc.clone(), None, lo, &mut self.zips);
+                if self.is_slow(&t.loc) {
+                    // Duplicate what is shown instead of re-reading a slow location.
+                    nt.entries = t.entries.iter().cloned().map(|mut e| {
+                        e.selected = false;
+                        e
+                    }).collect();
+                } else {
+                    let _ = nt.go(t.loc.clone(), None, lo, &mut self.zips);
+                }
                 let p = &mut self.panels[side.index()];
                 p.tabs.insert(p.active + 1, nt);
                 p.active += 1;
@@ -1357,7 +1489,13 @@ impl App {
                     _ => t.loc.clone(),
                 };
                 let mut nt = Tab::new(loc.clone(), t.sort, t.view);
-                if nt.go(loc, None, lo, &mut self.zips).is_ok() {
+                if self.is_slow(&loc) {
+                    let p = &mut self.panels[side.index()];
+                    p.tabs.insert(p.active + 1, nt);
+                    p.active += 1;
+                    let index = p.active;
+                    self.spawn_listing(side, index, loc, None, true);
+                } else if nt.go(loc, None, lo, &mut self.zips).is_ok() {
                     let p = &mut self.panels[side.index()];
                     p.tabs.insert(p.active + 1, nt);
                     p.active += 1;
@@ -1433,7 +1571,7 @@ impl App {
                         if cmd == CopyDetails {
                             let size = if e.is_dir { "<DIR>".into() } else { crate::format::thousands(e.size) };
                             let date = e.modified.map(crate::format::datetime).unwrap_or_default();
-                            format!("{name}\t{size}\t{date}\t{}", crate::format::attr_string(e.attrs))
+                            format!("{name}\t{size}\t{date}\t{}", e.attr_text())
                         } else {
                             name
                         }
@@ -1457,6 +1595,10 @@ impl App {
             View => self.view_current(),
             Edit => {
                 let c = self.atab().cursor;
+                if self.atab().loc.remote().is_some() {
+                    self.fetch_then(side, c, "edit");
+                    return;
+                }
                 if self.atab().entries.get(c).is_some_and(|e| !e.is_dir) {
                     if let Some(p) = self.materialize(side, c) {
                         let editor = self.cfg.editor.clone();
@@ -1551,6 +1693,7 @@ impl App {
                 let dest = match &self.atab().loc {
                     Location::Fs(d) => Dest::Dir(d.clone()),
                     Location::Archive { archive, inner } => Dest::Archive { archive: archive.clone(), inner: inner.clone() },
+                    Location::Remote { conn, path } => Dest::Remote { conn: conn.clone(), dir: path.clone() },
                     _ => return,
                 };
                 match win::get_clipboard_files() {
@@ -1624,6 +1767,7 @@ impl App {
                 Some(path) => match crate::ini::Ini::load(&path) {
                     Ok(ini) => {
                         self.cfg.import_tc(&ini);
+                        let sites = self.import_tc_sites();
                         self.cfg.imported_from = Some(path.to_string_lossy().into_owned());
                         self.applied_dark = None;
                         let (l, r) = (self.cfg.left.clone(), self.cfg.right.clone());
@@ -1637,7 +1781,7 @@ impl App {
                         self.dialog = Some(Dialog::Message {
                             title: "Import".into(),
                             text: format!(
-                                "Imported from {}:\n\n- {} hotlist entries\n- {} command line history entries\n- panel paths, sort order, quick search mode, theme and hidden-file setting",
+                                "Imported from {}:\n\n- {} hotlist entries\n- {} command line history entries\n- {sites} new FTP connection(s)\n- panel paths, sort order, quick search mode, theme and hidden-file setting",
                                 path.display(),
                                 self.cfg.hotlist.len(),
                                 self.cfg.cmd_history.len()
@@ -1658,6 +1802,15 @@ impl App {
             Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Run(line) => self.run_command_line(&line, false),
             MenuOpen(i) => self.open_main_menu(i % crate::commands::MENU_COUNT),
+            FtpConnect => self.dialog = Some(Dialog::Sites { sel: 0 }),
+            FtpNew => self.dialog = Some(Dialog::QuickConnect { text: self.cfg.ftp_history.first().cloned().unwrap_or_default(), error: None, init: true }),
+            FtpDisconnect => self.disconnect(side),
+            HistoryGoto(pos) => {
+                let delta = pos as isize - self.atab().hist_pos as isize;
+                if delta != 0 {
+                    self.history_step(side, delta);
+                }
+            }
         }
     }
 
@@ -1689,7 +1842,11 @@ impl App {
                 other => other.display(),
             }
         };
-        let is_dir_single = sources.len() == 1 && matches!(&sources[0], Source::Fs(p) if p.is_dir()) || matches!(&sources[0], Source::Archive { is_dir: true, .. }) && sources.len() == 1;
+        let is_dir_single = sources.len() == 1
+            && match &sources[0] {
+                Source::Fs(p) => p.is_dir(),
+                Source::Archive { is_dir, .. } | Source::Remote { is_dir, .. } => *is_dir,
+            };
         let target = match &single {
             Some(name) if same_dir || !is_dir_single => format!("{target_base}{name}"),
             _ => format!("{target_base}*.*"),
@@ -1707,14 +1864,48 @@ impl App {
     }
 
     pub fn start_transfer(&mut self, mv: bool, sources: Vec<Source>, target: &str, src_dir: Option<PathBuf>) {
-        match parse_target(target, src_dir.as_deref(), sources.len()) {
-            Ok((dest, mask)) => self.start_job(OpRequest {
-                kind: if mv { OpKind::Move } else { OpKind::Copy },
-                sources,
-                dest: Some(dest),
-                mask,
-            }),
+        let parsed = match self.parse_remote_target(target, sources.len()) {
+            Some(r) => r,
+            None => parse_target(target, src_dir.as_deref(), sources.len()),
+        };
+        match parsed {
+            Ok((dest, mask)) => {
+                self.start_job(OpRequest { kind: if mv { OpKind::Move } else { OpKind::Copy }, sources, dest: Some(dest), mask });
+            }
             Err(e) => self.error(e),
+        }
+    }
+
+    /// A target like `sftp://me@host/dir/` names a directory on a server that
+    /// is open in a panel. `None` when the text isn't a URL.
+    fn parse_remote_target(&self, text: &str, n_sources: usize) -> Option<Result<(Dest, String), String>> {
+        let t = text.trim().trim_matches('"');
+        let (scheme, _) = t.split_once("://")?;
+        if scheme.contains(['\\', '/']) {
+            return None;
+        }
+        let conns = self.panels.iter().flat_map(|p| p.tabs.iter()).filter_map(|tab| tab.loc.remote().map(|(c, _)| c.clone()));
+        let mut best: Option<(Arc<crate::remote::Connection>, usize)> = None;
+        for c in conns {
+            let prefix = c.url_prefix();
+            let matches = t.len() >= prefix.len() && t[..prefix.len()].eq_ignore_ascii_case(&prefix) && t[prefix.len()..].chars().next().is_none_or(|ch| ch == '/');
+            if matches && best.as_ref().is_none_or(|(_, n)| prefix.len() > *n) {
+                best = Some((c, prefix.len()));
+            }
+        }
+        let Some((conn, n)) = best else {
+            return Some(Err(format!("Not connected to {t}.\n\nConnect first (Ctrl+F or Ctrl+N), then copy into that panel.")));
+        };
+        let rest = &t[n..];
+        let path = crate::remote::normalize(rest, "/");
+        if rest.is_empty() || rest.ends_with('/') {
+            return Some(Ok((Dest::Remote { conn, dir: path }, "*.*".into())));
+        }
+        let (dir, last) = crate::remote::split(&path).unwrap_or(("/".into(), String::new()));
+        if crate::mask::has_wildcards(&last) || n_sources == 1 {
+            Some(Ok((Dest::Remote { conn, dir }, last)))
+        } else {
+            Some(Ok((Dest::Remote { conn, dir: path }, "*.*".into())))
         }
     }
 
@@ -1725,7 +1916,7 @@ impl App {
             self.transfer_dialog(true, true);
             return;
         }
-        if !matches!(tab.loc, Location::Fs(_)) {
+        if !matches!(tab.loc, Location::Fs(_) | Location::Remote { .. }) {
             self.transfer_dialog(true, true);
             return;
         }
@@ -1736,6 +1927,20 @@ impl App {
     pub fn finish_rename(&mut self, accept: bool) {
         let Some(r) = self.rename.take() else { return };
         if !accept || r.text == r.original || r.text.trim().is_empty() {
+            return;
+        }
+        if let Some((_, dir)) = self.tab(r.side).loc.remote().map(|(c, d)| (c.clone(), d.to_string())) {
+            let new = r.text.trim().to_string();
+            if new.contains('/') {
+                self.error("A name on the server cannot contain \"/\".");
+                return;
+            }
+            if self.tab(r.side).entries.iter().any(|e| e.name == new) {
+                self.error(format!("\"{new}\" already exists."));
+                return;
+            }
+            let (from, to) = (crate::remote::join(&dir, &r.original), crate::remote::join(&dir, &new));
+            self.remote_op(r.side, Some(new), move |fs| fs.rename(&from, &to));
             return;
         }
         let Location::Fs(dir) = self.tab(r.side).loc.clone() else { return };
@@ -1764,6 +1969,22 @@ impl App {
             return;
         }
         let in_archive = sources.iter().any(|s| matches!(s, Source::Archive { .. }));
+        if sources.iter().any(|s| matches!(s, Source::Remote { .. })) {
+            // Servers have no recycle bin.
+            let req = OpRequest { kind: OpKind::Delete { recycle: false }, sources, dest: None, mask: String::new() };
+            if !self.cfg.confirm_delete {
+                self.start_job(req);
+                return;
+            }
+            let what = self.describe(side);
+            let server = self.atab().loc.remote().map(|(c, _)| c.url_prefix()).unwrap_or_default();
+            self.dialog = Some(Dialog::Confirm {
+                title: "Delete".into(),
+                text: format!("Do you really want to delete {what} from {server}?\n\nFiles on a server cannot be restored."),
+                action: ConfirmAction::Delete(req.sources, false),
+            });
+            return;
+        }
         // Network shares have no recycle bin: Windows would delete permanently.
         let network = sources.iter().any(|s| match s {
             Source::Fs(p) => {
@@ -1771,7 +1992,7 @@ impl App {
                 let letter = text.chars().next().filter(|_| text.as_bytes().get(1) == Some(&b':')).map(|c| c.to_ascii_uppercase());
                 text.starts_with("\\\\") || letter.is_some_and(|l| self.drives.iter().any(|d| d.letter == l && d.kind == win::DriveKind::Network))
             }
-            Source::Archive { .. } => false,
+            Source::Archive { .. } | Source::Remote { .. } => false,
         });
         let recycle = self.cfg.use_recycle_bin && !permanent && !in_archive && !network;
         if !self.cfg.confirm_delete && !(network && self.cfg.use_recycle_bin && !permanent) {
@@ -2013,6 +2234,10 @@ impl App {
             }
             return;
         }
+        if self.atab().loc.remote().is_some() {
+            self.fetch_then(side, c, "view");
+            return;
+        }
         if let Some(p) = self.materialize(side, c) {
             let id = self.next_viewer;
             self.next_viewer += 1;
@@ -2092,8 +2317,8 @@ impl App {
                 label: if i == tab.hist_pos { format!("> {}", l.display()) } else { l.display() },
                 detail: String::new(),
                 cmd: match l {
-                    Location::Fs(p) => Some(Cmd::GotoPath(p.to_string_lossy().into_owned())),
-                    _ => None,
+                    Location::Results { .. } => None,
+                    _ => Some(Cmd::HistoryGoto(i)),
                 },
             })
             .collect();
@@ -2405,7 +2630,7 @@ fn sha256_file(p: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn fxhash(s: &str) -> u64 {
+pub fn fxhash(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 

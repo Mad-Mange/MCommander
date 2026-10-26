@@ -1,5 +1,6 @@
-//! Virtual file system: local directories, the inside of ZIP archives and
-//! search result lists ("feed to listbox"), presented as one kind of listing.
+//! Virtual file system: local directories, the inside of archives, search
+//! result lists ("feed to listbox") and directories on FTP/SFTP servers,
+//! presented as one kind of listing.
 
 use crate::archive::ArchiveIndex;
 use crate::format::{self, ATTR_DIRECTORY, ATTR_HIDDEN, ATTR_REPARSE, ATTR_SYSTEM};
@@ -15,6 +16,8 @@ pub enum Location {
     Archive { archive: PathBuf, inner: String },
     /// A flat list of search results.
     Results { title: String, items: Arc<Vec<PathBuf>> },
+    /// A directory on an FTP/SFTP server; `path` is absolute and uses `/`.
+    Remote { conn: Arc<crate::remote::Connection>, path: String },
 }
 
 impl Location {
@@ -36,6 +39,7 @@ impl Location {
                 s
             }
             Location::Results { title, .. } => format!("{title}\\"),
+            Location::Remote { conn, path } => format!("{}{}", conn.url_prefix(), if path.ends_with('/') { path.clone() } else { format!("{path}/") }),
         }
     }
 
@@ -54,6 +58,10 @@ impl Location {
                     .unwrap_or_default(),
             },
             Location::Results { title, .. } => title.clone(),
+            Location::Remote { conn, path } => match crate::remote::split(path) {
+                Some((_, name)) => name,
+                None => conn.params.host.clone(),
+            },
         }
     }
 
@@ -70,7 +78,15 @@ impl Location {
         match self {
             Location::Fs(p) => Some(p.clone()),
             Location::Archive { archive, .. } => archive.parent().map(Path::to_path_buf),
-            Location::Results { .. } => None,
+            Location::Results { .. } | Location::Remote { .. } => None,
+        }
+    }
+
+    /// The server connection and directory of a remote location.
+    pub fn remote(&self) -> Option<(&Arc<crate::remote::Connection>, &str)> {
+        match self {
+            Location::Remote { conn, path } => Some((conn, path)),
+            _ => None,
         }
     }
 
@@ -79,7 +95,7 @@ impl Location {
         let p = match self {
             Location::Fs(p) => p.as_path(),
             Location::Archive { archive, .. } => archive.as_path(),
-            Location::Results { .. } => return None,
+            Location::Results { .. } | Location::Remote { .. } => return None,
         };
         let s = p.to_string_lossy();
         let mut chars = s.chars();
@@ -112,6 +128,10 @@ impl Location {
                 }
             }
             Location::Results { .. } => None,
+            Location::Remote { conn, path } => {
+                let (up, name) = crate::remote::split(path)?;
+                Some((Location::Remote { conn: conn.clone(), path: up }, name))
+            }
         }
     }
 
@@ -120,6 +140,7 @@ impl Location {
             Location::Fs(p) => Location::Fs(root_of(p)),
             Location::Archive { archive, .. } => Location::Fs(root_of(archive)),
             Location::Results { .. } => self.clone(),
+            Location::Remote { conn, .. } => Location::Remote { conn: conn.clone(), path: "/".into() },
         }
     }
 
@@ -131,6 +152,7 @@ impl Location {
                 inner: if inner.is_empty() { name.to_string() } else { format!("{inner}/{name}") },
             },
             Location::Results { .. } => self.clone(),
+            Location::Remote { conn, path } => Location::Remote { conn: conn.clone(), path: crate::remote::join(path, name) },
         }
     }
 
@@ -204,6 +226,8 @@ pub struct FileEntry {
     pub full_path: Option<PathBuf>,
     /// Name shown in branch view (relative path); defaults to `name`.
     pub display: Option<String>,
+    /// Unix permission bits of entries on SFTP/FTP servers.
+    pub mode: Option<u32>,
 }
 
 impl FileEntry {
@@ -219,6 +243,15 @@ impl FileEntry {
             dir_size: None,
             full_path: None,
             display: None,
+            mode: None,
+        }
+    }
+
+    /// Attribute column text: Windows attributes, or `rwxr-xr-x` on servers.
+    pub fn attr_text(&self) -> String {
+        match self.mode {
+            Some(m) => crate::remote::mode_string(m),
+            None => format::attr_string(self.attrs),
         }
     }
 
@@ -314,8 +347,7 @@ pub fn sort_entries(entries: &mut [FileEntry], spec: SortSpec) {
             SortColumn::Size if a.is_dir && a.dir_size.is_none() && b.dir_size.is_none() => by_name(a, b),
             SortColumn::Size => b.effective_size().cmp(&a.effective_size()).then_with(|| by_name(a, b)),
             SortColumn::Date => b.modified.cmp(&a.modified).then_with(|| by_name(a, b)),
-            SortColumn::Attr => format::attr_string(a.attrs)
-                .cmp(&format::attr_string(b.attrs))
+            SortColumn::Attr => a.attr_text().cmp(&b.attr_text())
                 .then_with(|| by_name(a, b)),
             SortColumn::Unsorted => Ordering::Equal,
         };
@@ -361,6 +393,7 @@ pub fn list_fs(dir: &Path, opts: ListOptions) -> std::io::Result<Vec<FileEntry>>
             dir_size: None,
             full_path: None,
             display: None,
+            mode: None,
         });
     }
     Ok(out)
@@ -393,6 +426,7 @@ pub fn list_results(items: &[PathBuf]) -> Vec<FileEntry> {
                 dir_size: None,
                 full_path: Some(p.clone()),
                 display: Some(p.to_string_lossy().into_owned()),
+                mode: None,
             })
         })
         .collect()
@@ -535,6 +569,7 @@ mod tests {
             dir_size: None,
             full_path: None,
             display: None,
+            mode: None,
         }
     }
 

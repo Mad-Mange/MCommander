@@ -1,7 +1,10 @@
 //! Background file operations with progress, overwrite prompts and cancel.
 //!
 //! A job runs on its own thread. The UI polls [`Job::progress`] every frame
-//! and answers overwrite prompts through [`Job::decide`].
+//! and answers overwrite prompts through [`Job::decide`]. Transfers to and
+//! from FTP/SFTP servers live in [`remote`].
+
+mod remote;
 
 use crate::archive::{self, AddItem, ArchiveIndex};
 use crate::mask::apply_rename_mask;
@@ -16,6 +19,8 @@ use std::time::{Instant, SystemTime};
 pub enum Source {
     Fs(PathBuf),
     Archive { archive: PathBuf, inner: String, is_dir: bool },
+    /// A file or directory on a server. Deleting a link removes the link only.
+    Remote { conn: Arc<crate::remote::Connection>, path: String, is_dir: bool, is_link: bool, size: u64, modified: Option<SystemTime> },
 }
 
 impl Source {
@@ -23,6 +28,7 @@ impl Source {
         match self {
             Source::Fs(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             Source::Archive { inner, .. } => inner.rsplit('/').next().unwrap_or(inner).to_string(),
+            Source::Remote { path, .. } => crate::remote::split(path).map(|(_, n)| n).unwrap_or_default(),
         }
     }
 }
@@ -31,11 +37,16 @@ impl Source {
 pub enum Dest {
     Dir(PathBuf),
     Archive { archive: PathBuf, inner: String },
+    /// A directory on a server.
+    Remote { conn: Arc<crate::remote::Connection>, dir: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpKind {
     Copy,
+    /// Copy, overwriting existing targets without asking (temporary copies
+    /// for viewing, uploading an edited file back).
+    CopyReplace,
     Move,
     Delete { recycle: bool },
     Pack { archive: PathBuf, move_files: bool },
@@ -103,6 +114,7 @@ struct Shared {
 }
 
 pub struct Job {
+    pub id: u64,
     pub background: bool,
     shared: Arc<Shared>,
 }
@@ -110,7 +122,7 @@ pub struct Job {
 impl Job {
     pub fn start(id: u64, request: OpRequest, ctx: egui::Context) -> Job {
         let title = match &request.kind {
-            OpKind::Copy => "Copying",
+            OpKind::Copy | OpKind::CopyReplace => "Copying",
             OpKind::Move => "Moving",
             OpKind::Delete { .. } => "Deleting",
             OpKind::Pack { .. } => "Packing",
@@ -143,7 +155,7 @@ impl Job {
         let worker = Worker {
             sh: shared.clone(),
             ctx,
-            overwrite_all: false,
+            overwrite_all: request.kind == OpKind::CopyReplace,
             skip_all: false,
             older_all: false,
             rename_all: false,
@@ -154,7 +166,7 @@ impl Job {
             .name(format!("job-{id}"))
             .spawn(move || worker.run(req))
             .expect("spawn job thread");
-        Job { background: false, shared }
+        Job { id, background: false, shared }
     }
 
     pub fn progress(&self) -> Progress {
@@ -177,6 +189,15 @@ enum Resolution {
     Write,
     Skip,
     RenameTo(PathBuf),
+    Cancel,
+}
+
+/// The answer to "target exists" independent of where the target lives.
+#[derive(PartialEq)]
+enum Choice {
+    Write,
+    Skip,
+    Rename,
     Cancel,
 }
 
@@ -216,7 +237,7 @@ impl Worker {
 
     fn run(mut self, req: OpRequest) {
         let result = match &req.kind {
-            OpKind::Copy | OpKind::Move => self.run_transfer(&req, req.kind == OpKind::Move),
+            OpKind::Copy | OpKind::CopyReplace | OpKind::Move => self.run_transfer(&req, req.kind == OpKind::Move),
             OpKind::Delete { recycle } => self.run_delete(&req.sources, *recycle),
             OpKind::Pack { archive, move_files } => self.run_pack(&req.sources, archive, *move_files),
             OpKind::CopyPairs(pairs) => self.run_pairs(pairs),
@@ -261,32 +282,35 @@ impl Worker {
 
     fn resolve(&mut self, target: &Path, src_size: u64, src_time: Option<SystemTime>) -> Resolution {
         let Ok(dst) = std::fs::metadata(target) else { return Resolution::Write };
+        match self.ask(&target.to_string_lossy(), src_size, src_time, dst.len(), dst.modified().ok()) {
+            Choice::Write => Resolution::Write,
+            Choice::Skip => Resolution::Skip,
+            Choice::Rename => Resolution::RenameTo(unique_name(target)),
+            Choice::Cancel => Resolution::Cancel,
+        }
+    }
+
+    /// Decides what to do with an existing target, asking the user unless an
+    /// earlier "... all" answer applies.
+    fn ask(&mut self, target: &str, src_size: u64, src_time: Option<SystemTime>, dst_size: u64, dst_time: Option<SystemTime>) -> Choice {
         if self.overwrite_all {
-            return Resolution::Write;
+            return Choice::Write;
         }
         if self.skip_all {
-            return Resolution::Skip;
+            return Choice::Skip;
         }
         if self.older_all {
-            let older = match (dst.modified().ok(), src_time) {
+            let older = match (dst_time, src_time) {
                 (Some(d), Some(s)) => d < s,
                 _ => false,
             };
-            return if older { Resolution::Write } else { Resolution::Skip };
+            return if older { Choice::Write } else { Choice::Skip };
         }
         if self.rename_all {
-            return Resolution::RenameTo(unique_name(target));
+            return Choice::Rename;
         }
         *self.sh.decision.lock().unwrap() = None;
-        self.update(|p| {
-            p.conflict = Some(Conflict {
-                target: target.to_string_lossy().into_owned(),
-                src_size,
-                src_time,
-                dst_size: dst.len(),
-                dst_time: dst.modified().ok(),
-            })
-        });
+        self.update(|p| p.conflict = Some(Conflict { target: target.to_string(), src_size, src_time, dst_size, dst_time }));
         self.ctx.request_repaint();
         let decision = {
             let mut guard = self.sh.decision.lock().unwrap();
@@ -297,26 +321,26 @@ impl Worker {
         };
         self.update(|p| p.conflict = None);
         match decision {
-            Decision::Overwrite => Resolution::Write,
+            Decision::Overwrite => Choice::Write,
             Decision::OverwriteAll => {
                 self.overwrite_all = true;
-                Resolution::Write
+                Choice::Write
             }
             Decision::OverwriteOlder => {
                 self.older_all = true;
-                self.resolve(target, src_size, src_time)
+                self.ask(target, src_size, src_time, dst_size, dst_time)
             }
-            Decision::Skip => Resolution::Skip,
+            Decision::Skip => Choice::Skip,
             Decision::SkipAll => {
                 self.skip_all = true;
-                Resolution::Skip
+                Choice::Skip
             }
-            Decision::AutoRename => Resolution::RenameTo(unique_name(target)),
+            Decision::AutoRename => Choice::Rename,
             Decision::AutoRenameAll => {
                 self.rename_all = true;
-                Resolution::RenameTo(unique_name(target))
+                Choice::Rename
             }
-            Decision::Cancel => Resolution::Cancel,
+            Decision::Cancel => Choice::Cancel,
         }
     }
 
@@ -324,6 +348,9 @@ impl Worker {
 
     fn run_transfer(&mut self, req: &OpRequest, is_move: bool) -> R<()> {
         let dest = req.dest.clone().ok_or("No target")?;
+        if matches!(dest, Dest::Remote { .. }) || req.sources.iter().any(|s| matches!(s, Source::Remote { .. })) {
+            return self.run_remote_transfer(req, dest, is_move);
+        }
         let fs_sources: Vec<PathBuf> =
             req.sources.iter().filter_map(|s| if let Source::Fs(p) = s { Some(p.clone()) } else { None }).collect();
         let zip_sources: Vec<&Source> = req.sources.iter().filter(|s| matches!(s, Source::Archive { .. })).collect();
@@ -374,6 +401,7 @@ impl Worker {
                     }
                 }
             }
+            Dest::Remote { .. } => unreachable!("handled by run_remote_transfer"),
             Dest::Archive { archive, inner } => {
                 if !zip_sources.is_empty() {
                     return Err("Copying between archives is not supported; unpack first.".into());
@@ -570,7 +598,7 @@ impl Worker {
                 Source::Archive { inner, is_dir, .. } => {
                     Some(Sel { base: inner.rfind('/').map(|i| i + 1).unwrap_or(0), inner: inner.clone(), is_dir: *is_dir })
                 }
-                Source::Fs(_) => None,
+                _ => None,
             })
             .collect();
         // Directories first, so empty ones are restored as well.
@@ -857,6 +885,9 @@ impl Worker {
     // ---- delete ------------------------------------------------------------
 
     fn run_delete(&mut self, sources: &[Source], recycle: bool) -> R<()> {
+        if sources.iter().any(|s| matches!(s, Source::Remote { .. })) {
+            return self.delete_remote(sources);
+        }
         let fs: Vec<PathBuf> = sources.iter().filter_map(|s| if let Source::Fs(p) = s { Some(p.clone()) } else { None }).collect();
         let zip: HashSet<String> =
             sources.iter().filter_map(|s| if let Source::Archive { inner, .. } = s { Some(inner.clone()) } else { None }).collect();

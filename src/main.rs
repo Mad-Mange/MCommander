@@ -13,6 +13,8 @@ mod mask;
 mod ops;
 mod paint_icons;
 mod panel;
+mod remote;
+mod remote_ui;
 mod rename;
 mod search;
 mod sync;

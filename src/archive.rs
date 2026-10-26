@@ -235,6 +235,7 @@ impl ArchiveIndex {
                     dir_size: None,
                     full_path: None,
                     display: None,
+                    mode: None,
                 }),
             }
         }
@@ -251,6 +252,7 @@ impl ArchiveIndex {
                 dir_size: None,
                 full_path: None,
                 display: None,
+                mode: None,
             })
             .collect();
         out.extend(files);

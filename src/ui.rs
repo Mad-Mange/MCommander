@@ -223,6 +223,12 @@ fn toolbar(app: &mut App, ui: &mut Ui) {
         let hidden = app.cfg.show_hidden;
         tool_button(app, ui, Icon::Hidden, "Show hidden/system files (Ctrl+H)", Cmd::ToggleHidden, hidden);
         tool_button(app, ui, Icon::Hotlist, "Directory hotlist (Ctrl+D)", Cmd::Hotlist, false);
+        let connected = app.atab().loc.remote().is_some();
+        if connected {
+            tool_button(app, ui, Icon::Network, "Disconnect from the server (Ctrl+Shift+F)", Cmd::FtpDisconnect, true);
+        } else {
+            tool_button(app, ui, Icon::Network, "Connect to FTP/SFTP server (Ctrl+F)", Cmd::FtpConnect, false);
+        }
         tool_sep(ui, &pal);
         tool_button(app, ui, Icon::Terminal, "Open command prompt here", Cmd::OpenTerminal, false);
         tool_button(app, ui, Icon::Notepad, "Notepad", Cmd::Run("notepad.exe".into()), false);
@@ -482,8 +488,17 @@ fn info_line(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         app.pending.push(Cmd::DriveMenu(side));
     }
     // Volume label and free space.
+    if loc.remote().is_some() {
+        let icon_r = Rect::from_min_size(pos2(combo.left() + 3.0, combo.center().y - 8.0), vec2(16.0, 16.0));
+        paint_icons::paint(ui.painter(), icon_r, Icon::Network, pal.text);
+    }
     let text = match (&loc, letter) {
         (Location::Results { title, .. }, _) => title.clone(),
+        (Location::Remote { conn, .. }, _) => {
+            let who = if conn.params.user.is_empty() { "anonymous".to_string() } else { conn.params.user.clone() };
+            let name = if conn.name == conn.params.host { String::new() } else { format!("  -  {}", conn.name) };
+            format!("[{}]  {who}@{}{name}", conn.params.protocol.short(), conn.params.host)
+        }
         (Location::Archive { archive, .. }, _) => {
             let size = std::fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
             let kind = crate::archive::format_of(&archive.to_string_lossy()).unwrap_or(crate::archive::Format::Zip).label();
@@ -638,8 +653,12 @@ fn path_header(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
 
 /// Column widths: [name, ext, size, date, attr]. With the extension shown
 /// as part of the name (TC's default look) the Ext column stays empty.
-fn columns(app: &App, width: f32) -> [f32; 5] {
-    let [ext, size, date, attr] = app.cfg.columns;
+fn columns(app: &App, width: f32, side: Side) -> [f32; 5] {
+    let [ext, size, date, mut attr] = app.cfg.columns;
+    if app.tab(side).loc.remote().is_some() {
+        // Unix permissions ("rwxr-xr-x") need more room than Windows attributes.
+        attr = attr.max(app.cfg.font_size * 6.2);
+    }
     let name = (width - ext - size - date - attr).max(60.0);
     [name, ext, size, date, attr]
 }
@@ -647,7 +666,7 @@ fn columns(app: &App, width: f32) -> [f32; 5] {
 fn column_header(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     let pal = app.pal.clone();
     let list_w = rect.width() - SCROLL_W;
-    let cols = columns(app, list_w);
+    let cols = columns(app, list_w, side);
     let labels = ["Name", "Ext", "Size", "Date", "Attr"];
     let sorts = [SortColumn::Name, SortColumn::Ext, SortColumn::Size, SortColumn::Date, SortColumn::Attr];
     let sort = app.tab(side).sort;
@@ -875,7 +894,7 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     let painter = ui.painter().with_clip_rect(list_rect);
     let active_panel = app.active == side;
     let renaming = app.rename.as_ref().filter(|r| r.side == side).map(|r| r.index);
-    let cols = columns(app, list_rect.width());
+    let cols = columns(app, list_rect.width(), side);
     let fnt = font(app);
     let loc = app.tab(side).loc.clone();
     let visible: Vec<usize> = match view {
@@ -937,7 +956,7 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
                 painter.with_clip_rect(Rect::from_min_size(pos2(x, row_rect.top()), vec2(cols[3], rh))).text(pos2(x + 4.0, row_rect.center().y), Align2::LEFT_CENTER, format::datetime(t), fnt.clone(), color);
             }
             x += cols[3];
-            painter.text(pos2(x + 4.0, row_rect.center().y), Align2::LEFT_CENTER, format::attr_string(e.attrs), fnt.clone(), color);
+            painter.text(pos2(x + 4.0, row_rect.center().y), Align2::LEFT_CENTER, e.attr_text(), fnt.clone(), color);
         }
     }
     if let Some(err) = app.tab(side).error.clone() {
@@ -1245,7 +1264,7 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
     app.active = drag.side;
     let sources = app.sources(drag.side);
     let target = match &dest_loc {
-        Location::Fs(_) | Location::Archive { .. } => format!("{}*.*", dest_loc.display()),
+        Location::Fs(_) | Location::Archive { .. } | Location::Remote { .. } => format!("{}*.*", dest_loc.display()),
         _ => return,
     };
     let src_dir = app.tab(drag.side).loc.host_dir();
@@ -1269,7 +1288,7 @@ fn handle_external_drop(app: &mut App, ui: &mut Ui) {
         .and_then(|p| [Side::Left, Side::Right].into_iter().find(|s| app.panel_rects[s.index()].contains(p)))
         .unwrap_or(app.active);
     let loc = app.tab(side).loc.clone();
-    if !matches!(loc, Location::Fs(_) | Location::Archive { .. }) {
+    if !matches!(loc, Location::Fs(_) | Location::Archive { .. } | Location::Remote { .. }) {
         return;
     }
     let src_dir = dropped[0].parent().map(|p| p.to_path_buf());

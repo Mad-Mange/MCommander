@@ -26,6 +26,10 @@ fn archive_suffix(name: &str) -> &str {
 
 pub enum ConfirmAction {
     Delete(Vec<Source>, bool),
+    /// Add a connection made with Ctrl+N to the saved list.
+    SaveSite(Box<crate::remote::sites::Site>),
+    /// Upload an edited temporary copy back to its server directory.
+    Upload(PathBuf, std::sync::Arc<crate::remote::Connection>, String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +65,15 @@ pub enum Dialog {
     Tree(Box<crate::tree::TreeDialog>),
     About,
     Keyboard,
+    /// Saved FTP/SFTP connections (Ctrl+F).
+    Sites { sel: usize },
+    SiteEdit(Box<crate::remote_ui::SiteEdit>),
+    /// Connect to a URL (Ctrl+N).
+    QuickConnect { text: String, error: Option<String>, init: bool },
+    Password(Box<crate::remote_ui::PasswordState>),
+    HostKey { req: Box<crate::remote_ui::ConnectRequest>, info: crate::remote::HostKeyInfo },
+    Certificate { req: Box<crate::remote_ui::ConnectRequest>, info: crate::remote::CertInfo },
+    Connecting { label: String },
 }
 
 const ATTR_BITS: [(u32, &str); 4] = [
@@ -96,7 +109,7 @@ impl Dialog {
 
 /// Shows a modal with a title; returns the inner value and whether Escape
 /// was pressed.
-fn modal<R>(ctx: &Context, id: &str, title: &str, pal: &Palette, width: f32, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
+pub(crate) fn modal<R>(ctx: &Context, id: &str, title: &str, pal: &Palette, width: f32, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
     let frame = egui::Frame::window(&ctx.global_style()).fill(pal.face).inner_margin(egui::Margin::same(14));
     let resp = egui::Modal::new(egui::Id::unique(id)).frame(frame).show(ctx, |ui| {
         ui.set_width(width);
@@ -109,7 +122,7 @@ fn modal<R>(ctx: &Context, id: &str, title: &str, pal: &Palette, width: f32, add
 }
 
 /// Right-aligned button row; returns the index of the clicked button.
-fn buttons(ui: &mut Ui, labels: &[&str]) -> Option<usize> {
+pub(crate) fn buttons(ui: &mut Ui, labels: &[&str]) -> Option<usize> {
     let mut clicked = None;
     ui.add_space(10.0);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -122,7 +135,7 @@ fn buttons(ui: &mut Ui, labels: &[&str]) -> Option<usize> {
     clicked
 }
 
-fn enter(ui: &Ui) -> bool {
+pub(crate) fn enter(ui: &Ui) -> bool {
     ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.any())
 }
 
@@ -183,6 +196,14 @@ pub fn draw(app: &mut App, ctx: &Context) {
                         ConfirmAction::Delete(sources, recycle) => {
                             let req = OpRequest { kind: OpKind::Delete { recycle: *recycle }, sources: std::mem::take(sources), dest: None, mask: String::new() };
                             app.start_job(req);
+                        }
+                        ConfirmAction::SaveSite(site) => {
+                            app.cfg.sites.push((**site).clone());
+                            app.save_config();
+                            app.toast("Connection saved (Ctrl+F)");
+                        }
+                        ConfirmAction::Upload(local, conn, dir) => {
+                            app.upload_edited(local.clone(), conn.clone(), dir.clone());
                         }
                     }
                     false
@@ -541,6 +562,13 @@ pub fn draw(app: &mut App, ctx: &Context) {
             });
             !(r || esc)
         }
+        Dialog::Sites { .. }
+        | Dialog::SiteEdit(_)
+        | Dialog::QuickConnect { .. }
+        | Dialog::Password(_)
+        | Dialog::HostKey { .. }
+        | Dialog::Certificate { .. }
+        | Dialog::Connecting { .. } => crate::remote_ui::draw_dialog(app, ctx, &mut dialog),
     };
     if keep && app.dialog.is_none() {
         app.dialog = Some(dialog);
@@ -568,6 +596,23 @@ fn finish_input(app: &mut App, kind: InputKind, value: String) {
                         }
                         Err(e) => app.error(format!("Could not create {}:\n{e}", target.display())),
                     }
+                }
+                crate::vfs::Location::Remote { path, .. } => {
+                    let dirs: Vec<String> = name.split(['/', '\\']).filter(|p| !p.is_empty()).map(str::to_string).collect();
+                    let first = dirs.first().cloned();
+                    app.remote_op(side, first, move |fs| {
+                        let mut at = path;
+                        for d in &dirs {
+                            at = crate::remote::join(&at, d);
+                            if let Err(e) = fs.mkdir(&at) {
+                                // An existing parent is fine for "a/b".
+                                if d == dirs.last().unwrap() {
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
                 }
                 crate::vfs::Location::Archive { archive, inner } => {
                     let tmp = std::env::temp_dir().join("MCommander").join("mkdir").join(&name);

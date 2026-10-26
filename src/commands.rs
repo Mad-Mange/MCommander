@@ -37,6 +37,14 @@ pub enum Cmd {
     NetworkDrives,
     MapNetworkDrive,
     DisconnectNetworkDrive,
+    /// Saved FTP/SFTP connections (Ctrl+F).
+    FtpConnect,
+    /// Connect to a URL or host (Ctrl+N).
+    FtpNew,
+    /// Disconnect the server in the active panel (Ctrl+Shift+F).
+    FtpDisconnect,
+    /// Jump to entry n of the active tab's directory history.
+    HistoryGoto(usize),
     // View
     Brief,
     Full,
@@ -234,6 +242,9 @@ pub fn map_key(key: Key, m: Modifiers, kc: KeyCtx) -> Option<Cmd> {
         Key::A if ctrl => SelectAll,
         Key::B if ctrl => BranchView,
         Key::D if ctrl => Hotlist,
+        Key::F if ctrl => FtpConnect,
+        Key::F if ctrl_shift => FtpDisconnect,
+        Key::N if ctrl => FtpNew,
         Key::H if ctrl => ToggleHidden,
         Key::L if ctrl => OccupiedSpace,
         Key::M if ctrl => MultiRename,
@@ -325,6 +336,10 @@ pub fn main_menu() -> Vec<(&'static str, Vec<MenuItem>)> {
         (
             "Net",
             vec![
+                item("FTP/SFTP Connect...", "Ctrl+F", FtpConnect),
+                item("FTP/SFTP New Connection...", "Ctrl+N", FtpNew),
+                item("FTP/SFTP Disconnect", "Ctrl+Shift+F", FtpDisconnect),
+                SEP,
                 item("Map Network Drive...", "", MapNetworkDrive),
                 item("Disconnect Network Drive...", "", DisconnectNetworkDrive),
                 item("Network Drives", "", NetworkDrives),
@@ -422,6 +437,9 @@ pub const KEYBOARD_HELP: &[(&str, &str)] = &[
     ("Ctrl+B", "Branch view (all files in subdirectories)"),
     ("Ctrl+C / X / V", "Copy / cut / paste files via clipboard"),
     ("Ctrl+D", "Directory hotlist"),
+    ("Ctrl+F", "Connect to an FTP/FTPS/SFTP server (saved connections)"),
+    ("Ctrl+N", "New FTP/FTPS/SFTP connection (host name or URL)"),
+    ("Ctrl+Shift+F", "Disconnect from the server"),
     ("Ctrl+H", "Show hidden and system files"),
     ("Ctrl+L", "Calculate occupied space"),
     ("Ctrl+M", "Multi-rename tool"),
@@ -451,6 +469,9 @@ mod tests {
         assert_eq!(map_key(Key::F6, Modifiers::SHIFT, CTX), Some(Cmd::Rename));
         assert_eq!(map_key(Key::F7, Modifiers::ALT, CTX), Some(Cmd::Search));
         assert_eq!(map_key(Key::F3, Modifiers::CTRL, CTX), Some(Cmd::SortBy(SortColumn::Name)));
+        assert_eq!(map_key(Key::F, Modifiers::CTRL, CTX), Some(Cmd::FtpConnect));
+        assert_eq!(map_key(Key::F, Modifiers::CTRL | Modifiers::SHIFT, CTX), Some(Cmd::FtpDisconnect));
+        assert_eq!(map_key(Key::N, Modifiers::CTRL, CTX), Some(Cmd::FtpNew));
     }
 
     #[test]

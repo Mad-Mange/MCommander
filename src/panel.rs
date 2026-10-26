@@ -80,12 +80,25 @@ pub fn read_fs(path: &std::path::Path, branch: bool, opts: ListOptions) -> Listi
     }
 }
 
+/// Reads a directory on a server; runs on a worker thread.
+pub fn read_remote(conn: &crate::remote::Connection, path: &str, opts: ListOptions) -> Listing {
+    let list = conn.with(|fs| fs.list(path)).map_err(|e| format!("{}{path}\n\n{e}", conn.url_prefix()))?;
+    let mut out = Vec::new();
+    if path != "/" {
+        out.push(FileEntry::parent_entry(None, crate::format::ATTR_DIRECTORY));
+    }
+    out.extend(crate::remote::to_file_entries(list, opts.show_hidden));
+    Ok((out, None))
+}
+
 pub struct Tab {
     /// Stable identity, used to route results of background listings.
     pub id: u64,
-    /// Location being read in the background (slow drives); the old entries
-    /// stay visible meanwhile.
+    /// Location being read in the background (slow drives, servers); the
+    /// old entries stay visible meanwhile.
     pub loading: Option<Location>,
+    /// History to restore once a background history jump has finished.
+    pub pending_history: Option<(Vec<Location>, usize)>,
     pub loc: Location,
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
@@ -118,6 +131,7 @@ impl Tab {
         Tab {
             id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             loading: None,
+            pending_history: None,
             history: vec![loc.clone()],
             loc,
             entries: Vec::new(),
@@ -149,6 +163,7 @@ impl Tab {
                 Ok((vfs::list_archive(&idx, inner), Some(idx)))
             }
             Location::Results { items, .. } => Ok((vfs::list_results(items), None)),
+            Location::Remote { conn, path } => read_remote(conn, path, opts),
         }
     }
 
@@ -467,6 +482,12 @@ impl Panel {
 
     pub fn tab_mut(&mut self) -> &mut Tab {
         &mut self.tabs[self.active]
+    }
+
+    /// The last local directory this tab showed (to return to after a
+    /// server is disconnected).
+    pub fn last_local(tab: &Tab) -> Option<Location> {
+        tab.history.iter().rev().find(|l| matches!(l, Location::Fs(_))).cloned()
     }
 
     pub fn remember_drive(&mut self) {
