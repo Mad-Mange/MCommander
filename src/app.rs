@@ -48,6 +48,23 @@ pub struct DragState {
     pub active: bool,
 }
 
+/// Right mouse button held on a file list (Total Commander's selection mode):
+/// a short click toggles the entry, dragging paints the same state over more
+/// entries and holding still opens the context menu.
+pub struct RightSelect {
+    pub side: Side,
+    /// Entry under the press; `None` on ".." or the empty area.
+    pub start: Option<usize>,
+    /// Last entry the selection state was applied to.
+    pub last: Option<usize>,
+    pub state: bool,
+    pub was_selected: bool,
+    pub at: Instant,
+    pub pos: Pos2,
+    /// The pointer reached another entry: no context menu any more.
+    pub moved: bool,
+}
+
 pub struct PopupItem {
     pub label: String,
     pub detail: String,
@@ -108,8 +125,11 @@ pub enum Step {
     Shot(PathBuf),
     ShotChild(PathBuf),
     ShotSearch(PathBuf),
-    /// Mouse press (true) or release (false) at a position in points.
-    Mouse(Pos2, bool),
+    /// Mouse button press or release at a position in points; `click`
+    /// releases the button again right after the press.
+    Mouse { pos: Pos2, button: egui::PointerButton, pressed: bool, click: bool },
+    /// Pointer movement (for drags).
+    Move(Pos2),
     Exit,
 }
 
@@ -136,6 +156,7 @@ pub struct App {
     pub rename: Option<InlineRename>,
     pub path_edit: Option<PathEdit>,
     pub drag: Option<DragState>,
+    pub right_sel: Option<RightSelect>,
     pub drives: Vec<win::DriveInfo>,
     drives_at: Instant,
     pub drive_extra: HashMap<char, DriveExtra>,
@@ -162,8 +183,9 @@ pub struct App {
     pub context_at: Option<Pos2>,
     /// Screen rectangles of the main menu titles (for keyboard menus).
     pub menu_rects: Vec<egui::Rect>,
-    /// The OLE drag loop swallowed the mouse-up: synthesize it next frame.
-    pub release_pointer: bool,
+    /// A modal loop (OLE drag, shell context menu) swallowed this button's
+    /// mouse-up: synthesize it next frame.
+    pub release_pointer: Option<egui::PointerButton>,
     pub ppp: f32,
     /// Id of the connection attempt in progress (results of others are dropped).
     pub connecting: Option<u64>,
@@ -232,6 +254,7 @@ impl App {
             rename: None,
             path_edit: None,
             drag: None,
+            right_sel: None,
             drives: win::drives(),
             drives_at: Instant::now(),
             drive_extra: HashMap::new(),
@@ -256,7 +279,7 @@ impl App {
             frame_no: 0,
             context_at: None,
             menu_rects: Vec::new(),
-            release_pointer: false,
+            release_pointer: None,
             ppp: 1.0,
             connecting: None,
             connect_attempt: 0,
@@ -1169,6 +1192,9 @@ impl App {
                     let ext = exe.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                     if ext == "exe" || ext == "com" {
                         win::spawn_detached(&exe.to_string_lossy(), rest, Some(&cwd))
+                    } else if (ext == "cmd" || ext == "bat") && win::batch_starts_gui_only(&exe) {
+                        // A launcher such as VS Code's code.cmd: no console window.
+                        win::spawn_hidden("cmd.exe", &format!("/S /C \"{line}\""), Some(&cwd))
                     } else {
                         win::spawn_detached("cmd.exe", &format!("/S /C \"{line}\""), Some(&cwd))
                     }
@@ -1260,14 +1286,15 @@ impl App {
                 }
             }
             Step::Text(t) => raw.events.push(Event::Text(t)),
-            Step::Mouse(pos, pressed) => {
+            Step::Mouse { pos, button, pressed, click } => {
                 raw.events.push(Event::PointerMoved(pos));
-                raw.events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
-                if pressed {
-                    self.steps.push_front(Step::Mouse(pos, false));
+                raw.events.push(Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE });
+                if pressed && click {
+                    self.steps.push_front(Step::Mouse { pos, button, pressed: false, click: false });
                     delay = 60;
                 }
             }
+            Step::Move(pos) => raw.events.push(Event::PointerMoved(pos)),
             Step::Raw(k) => win::push_raw_key(k),
             Step::Wait(ms) => delay = ms,
             Step::Shot(path) => {
@@ -2558,9 +2585,9 @@ impl eframe::App for App {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if std::mem::take(&mut self.release_pointer) {
+        if let Some(button) = self.release_pointer.take() {
             let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(Pos2::ZERO);
-            raw_input.events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            raw_input.events.push(Event::PointerButton { pos, button, pressed: false, modifiers: Modifiers::NONE });
             raw_input.events.push(Event::PointerGone);
         }
         self.inject_steps(ctx, raw_input);

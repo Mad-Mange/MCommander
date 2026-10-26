@@ -44,7 +44,8 @@ fn usage() -> &'static str {
      /I=file.ini    use this settings file\n\
      --size=WxH     initial window size\n\
      --keys=K1,K2   scripted input for tests (Down, Ctrl+F3, Text:abc, Wait:300,\n\
-                    NumPlus, NumMinus, NumStar, CtrlC, CtrlV, Shot:file.png, Exit)\n"
+                    NumPlus, NumMinus, NumStar, CtrlC, CtrlV, Click:x;y, RClick:x;y,\n\
+                    RDown:x;y, Move:x;y, RUp:x;y, Shot:file.png, Exit)\n"
 }
 
 fn parse_step(token: &str) -> Option<Step> {
@@ -55,9 +56,23 @@ fn parse_step(token: &str) -> Option<Step> {
     if let Some(v) = t.strip_prefix("Wait:") {
         return v.parse().ok().map(Step::Wait);
     }
-    if let Some(v) = t.strip_prefix("Click:") {
+    let pos = |v: &str| -> Option<egui::Pos2> {
         let (x, y) = v.split_once(';')?;
-        return Some(Step::Mouse(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?), true));
+        Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
+    };
+    use egui::PointerButton::{Primary, Secondary};
+    for (prefix, button, pressed, click) in [
+        ("Click:", Primary, true, true),
+        ("RClick:", Secondary, true, true),
+        ("RDown:", Secondary, true, false),
+        ("RUp:", Secondary, false, false),
+    ] {
+        if let Some(v) = t.strip_prefix(prefix) {
+            return Some(Step::Mouse { pos: pos(v)?, button, pressed, click });
+        }
+    }
+    if let Some(v) = t.strip_prefix("Move:") {
+        return pos(v).map(Step::Move);
     }
     if let Some(v) = t.strip_prefix("ShotSearch:") {
         return Some(Step::ShotSearch(PathBuf::from(v)));

@@ -522,8 +522,18 @@ pub fn set_dark_title_bar(hwnd: HWND, dark: bool) {
 
 /// Starts a program without blocking; console programs get their own console.
 pub fn spawn_detached(program: &str, args_raw: &str, dir: Option<&Path>) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
     const CREATE_NEW_CONSOLE: u32 = 0x10;
+    spawn_with_flags(program, args_raw, dir, CREATE_NEW_CONSOLE)
+}
+
+/// Like [`spawn_detached`], but a console program gets no window.
+pub fn spawn_hidden(program: &str, args_raw: &str, dir: Option<&Path>) -> std::io::Result<()> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    spawn_with_flags(program, args_raw, dir, CREATE_NO_WINDOW)
+}
+
+fn spawn_with_flags(program: &str, args_raw: &str, dir: Option<&Path>, flags: u32) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
     let mut cmd = std::process::Command::new(program);
     if !args_raw.is_empty() {
         cmd.raw_arg(args_raw);
@@ -531,7 +541,92 @@ pub fn spawn_detached(program: &str, args_raw: &str, dir: Option<&Path>) -> std:
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
-    cmd.creation_flags(CREATE_NEW_CONSOLE).spawn().map(|_| ())
+    cmd.creation_flags(flags).spawn().map(|_| ())
+}
+
+/// Whether an executable is a Windows (GUI) program rather than a console
+/// program, from the subsystem field of its PE header.
+pub fn exe_is_gui(path: &Path) -> Option<bool> {
+    use std::io::Read;
+    let mut head = vec![0u8; 4096];
+    let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+    head.truncate(n);
+    let u32_at = |o: usize| head.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    if head.get(..2)? != b"MZ" {
+        return None;
+    }
+    let pe = u32_at(0x3C)? as usize;
+    if head.get(pe..pe + 4)? != b"PE\0\0" {
+        return None;
+    }
+    // The optional header follows the 20-byte file header; Subsystem is at
+    // offset 68 in both its 32- and 64-bit layouts.
+    let sub = head.get(pe + 24 + 68..pe + 24 + 70)?;
+    match u16::from_le_bytes([sub[0], sub[1]]) {
+        2 => Some(true),
+        3 => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether a batch file only starts Windows programs, like VS Code's
+/// `code.cmd`. Total Commander opens such commands without a console window
+/// showing up. Anything that runs a console program (`node`, `python`, an
+/// unknown `%var%`) or waits for input keeps its console.
+pub fn batch_starts_gui_only(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else { return false };
+    if bytes.len() > 64 * 1024 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let dir = path.parent().map(|d| format!("{}\\", d.display())).unwrap_or_default();
+    let mut found_gui = false;
+    for raw in text.lines() {
+        let line = raw.trim().trim_start_matches('@').trim();
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("rem ") || lower.starts_with("::") {
+            continue;
+        }
+        if lower.starts_with("pause") || lower.contains("set /p") || lower.starts_with("choice") {
+            return false;
+        }
+        for exe in exe_tokens(line) {
+            let resolved = exe.replace("%~dp0", &dir).replace("%~DP0", &dir);
+            if resolved.contains('%') || resolved.contains('!') {
+                return false;
+            }
+            let p = if resolved.contains('\\') || resolved.contains('/') { Some(PathBuf::from(&resolved)) } else { find_on_path(&resolved, None) };
+            match p.and_then(|p| exe_is_gui(&p)) {
+                Some(true) => found_gui = true,
+                _ => return false,
+            }
+        }
+    }
+    found_gui
+}
+
+/// The `.exe` names mentioned on a batch file line, quoted or bare.
+fn exe_tokens(line: &str) -> Vec<String> {
+    let lower = line.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(".exe") {
+        let end = from + i + 4;
+        let at_boundary = lower[end..].chars().next().is_none_or(|c| c == '"' || c.is_whitespace());
+        if at_boundary {
+            let before = &line[..from + i];
+            let start = match before.rfind('"') {
+                // Inside quotes: the token starts after the opening quote.
+                Some(q) if before[..q].matches('"').count() % 2 == 0 => q + 1,
+                _ => before.rfind(|c: char| c.is_whitespace() || c == '=' || c == '(').map_or(0, |j| j + 1),
+            };
+            // `set "var=C:\x.exe"` quotes the whole assignment.
+            let token = &line[start..end];
+            out.push(token.rsplit_once('=').map_or(token, |(_, path)| path).to_string());
+        }
+        from = end;
+    }
+    out
 }
 
 /// Finds an executable on PATH using PATHEXT, like cmd.exe does.
@@ -734,6 +829,41 @@ pub fn shell_context_menu(hwnd: HWND, paths: &[PathBuf], client_pt: Option<(i32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_exe_names_on_batch_lines() {
+        assert_eq!(exe_tokens(r#""%~dp0..\Code.exe" "%~dp0..\res\cli.js" %*"#), vec![r"%~dp0..\Code.exe"]);
+        assert_eq!(exe_tokens(r#"IF EXIST "%dp0%\node.exe" ("#), vec![r"%dp0%\node.exe"]);
+        assert_eq!(exe_tokens(r"start notepad.exe readme.txt"), vec!["notepad.exe"]);
+        assert_eq!(exe_tokens(r#"set "_prog=C:\Tools\a b\x.exe""#), vec![r"C:\Tools\a b\x.exe"]);
+        assert!(exe_tokens("echo foo.exec").is_empty());
+    }
+
+    #[test]
+    fn gui_launcher_batch_files_run_without_console() {
+        let sys = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("System32");
+        assert_eq!(exe_is_gui(&sys.join("notepad.exe")), Some(true));
+        assert_eq!(exe_is_gui(&sys.join("cmd.exe")), Some(false));
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        // Shaped like VS Code's code.cmd, with notepad standing in for Code.exe.
+        let code = write(
+            "code.cmd",
+            &format!("@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n\"{}\" \"%~dp0cli.js\" %*\r\nendlocal\r\n", sys.join("notepad.exe").display()),
+        );
+        assert!(batch_starts_gui_only(&code));
+        std::fs::copy(sys.join("notepad.exe"), dir.path().join("gui.exe")).unwrap();
+        assert!(batch_starts_gui_only(&write("rel.cmd", "@\"%~dp0gui.exe\" %*\r\n")));
+        // npm shims (codex.cmd) run node through a variable: keep the console.
+        assert!(!batch_starts_gui_only(&write("codex.cmd", "@ECHO off\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n)\r\n")));
+        assert!(!batch_starts_gui_only(&write("console.cmd", &format!("\"{}\" /c dir\r\n", sys.join("cmd.exe").display()))));
+        assert!(!batch_starts_gui_only(&write("wait.cmd", &format!("\"{}\"\r\npause\r\n", sys.join("notepad.exe").display()))));
+        assert!(!batch_starts_gui_only(&write("plain.bat", "echo hello\r\n")));
+    }
 
     #[test]
     fn shell_data_object_offers_file_drop_format() {

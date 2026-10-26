@@ -923,6 +923,9 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
         (i < n).then_some(i)
     };
 
+    if app.cfg.right_button_select {
+        right_button_select(app, ui, side, list_rect, &index_at, max_top);
+    }
     let top = app.tab(side).top;
     // Clicks.
     if resp.clicked() || resp.secondary_clicked() || resp.double_clicked() || resp.drag_started() {
@@ -956,14 +959,15 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
                 app.pending.push(Cmd::Open);
             }
         }
-        if resp.secondary_clicked() {
+        if resp.secondary_clicked() && !app.cfg.right_button_select {
             if let Some(i) = hit {
                 app.tab_mut(side).cursor = i;
             }
             app.context_at = Some(p);
             app.pending.push(Cmd::ContextMenu);
         }
-        if resp.drag_started() {
+        // In the right button mode only the left button drags files.
+        if resp.drag_started_by(egui::PointerButton::Primary) || (resp.drag_started() && !app.cfg.right_button_select) {
             if let Some(i) = hit {
                 let tab = app.tab(side);
                 let e = &tab.entries[i];
@@ -1111,6 +1115,121 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
             let total_cols = n.div_ceil(rows.max(1));
             scrollbar(app, ui, track, side, total_cols, ncols_vis, false, rows);
         }
+    }
+}
+
+/// Total Commander's right mouse button mode: pressing the button toggles the
+/// entry under it, dragging gives the entries passed over the same state, and
+/// holding it still for `popup_delay_ms` opens the context menu (for the
+/// selection, which then includes the pressed entry). A press on ".." or
+/// below the last entry opens the folder's context menu on release.
+fn right_button_select(app: &mut App, ui: &Ui, side: Side, list_rect: Rect, index_at: &impl Fn(Pos2, usize) -> Option<usize>, max_top: usize) {
+    use egui::PointerButton::Secondary;
+    let (pressed, down, released, pos, shift) = ui.input(|i| {
+        (i.pointer.button_pressed(Secondary), i.pointer.button_down(Secondary), i.pointer.button_released(Secondary), i.pointer.latest_pos(), i.modifiers.shift)
+    });
+    let Some(p) = pos else { return };
+    if pressed && ui.rect_contains_pointer(list_rect) {
+        app.active = side;
+        app.quick = None;
+        if app.rename.as_ref().is_some_and(|r| r.side == side) {
+            app.finish_rename(true);
+        }
+        let tab = app.tab_mut(side);
+        let hit = index_at(p, tab.top);
+        let start = hit.filter(|&i| !tab.entries[i].is_parent);
+        let mut rs = crate::app::RightSelect { side, start, last: start, state: true, was_selected: false, at: std::time::Instant::now(), pos: p, moved: false };
+        if let Some(i) = hit {
+            tab.cursor = i;
+        }
+        if let Some(i) = start {
+            if shift {
+                // Shift+right click: select from the last clicked entry.
+                let a = tab.anchor.unwrap_or(tab.cursor);
+                tab.select_range(a, i, true);
+                rs.moved = true;
+            } else {
+                rs.was_selected = tab.entries[i].selected;
+                rs.state = !rs.was_selected;
+                tab.toggle(i);
+            }
+            tab.anchor = Some(i);
+        }
+        app.right_sel = Some(rs);
+        return;
+    }
+    if app.right_sel.as_ref().is_none_or(|r| r.side != side) {
+        return;
+    }
+    if released || !down {
+        let rs = app.right_sel.take().unwrap();
+        if released && rs.start.is_none() && !rs.moved {
+            app.context_at = Some(p);
+            app.pending.push(Cmd::ContextMenu);
+        }
+        return;
+    }
+    let delay = std::time::Duration::from_millis(app.cfg.popup_delay_ms as u64);
+    let view = app.tab(side).view;
+    let mut rs = app.right_sel.take().unwrap();
+    if rs.start.is_some() {
+        let tab = app.tab_mut(side);
+        // Scroll while the pointer is beyond the list's edge.
+        let (before, after) = match view {
+            ViewMode::Brief => (p.x < list_rect.left(), p.x > list_rect.right()),
+            _ => (p.y < list_rect.top(), p.y > list_rect.bottom()),
+        };
+        let step = match view {
+            ViewMode::Full => 1,
+            ViewMode::Brief => tab.page_rows.max(1),
+            ViewMode::Thumbs => tab.grid_cols.max(1),
+        };
+        if before {
+            tab.top = tab.top.saturating_sub(step);
+        } else if after {
+            tab.top = (tab.top + step).min(max_top);
+        }
+        if before || after {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+        }
+        let inside = pos2(p.x.clamp(list_rect.left() + 1.0, list_rect.right() - 1.0), p.y.clamp(list_rect.top() + 1.0, list_rect.bottom() - 1.0));
+        if let (Some(i), Some(last)) = (index_at(inside, tab.top), rs.last) {
+            if i != last {
+                rs.moved = true;
+                tab.select_range(last, i, rs.state);
+                tab.cursor = i;
+                rs.last = Some(i);
+            }
+        }
+    }
+    if rs.moved {
+        app.right_sel = Some(rs);
+        return;
+    }
+    let held = rs.at.elapsed();
+    if held >= delay {
+        // The menu is for the selection, including the pressed entry.
+        if let Some(i) = rs.start {
+            if let Some(e) = app.tab_mut(side).entries.get_mut(i) {
+                e.selected = true;
+            }
+        }
+        app.context_at = Some(rs.pos);
+        app.pending.push(Cmd::ContextMenu);
+        // The shell menu's modal loop eats the button release.
+        app.release_pointer = Some(Secondary);
+        return;
+    }
+    app.right_sel = Some(rs);
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+    if held.as_millis() > 120 {
+        // Progress towards the context menu, like TC's ContextProgress.
+        let pal = &app.pal;
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("context-progress")));
+        let r = Rect::from_min_size(p + vec2(12.0, 14.0), vec2(36.0, 5.0));
+        painter.rect(r, 1.0, pal.input_bg, Stroke::new(1.0, pal.border), StrokeKind::Outside);
+        let frac = held.as_secs_f32() / delay.as_secs_f32();
+        painter.rect_filled(Rect::from_min_size(r.min, vec2(r.width() * frac.min(1.0), r.height())), 1.0, pal.accent);
     }
 }
 
@@ -1311,7 +1430,7 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
                 .collect();
             if !paths.is_empty() {
                 let result = crate::win::drag_files_out(hwnd, &paths);
-                app.release_pointer = true;
+                app.release_pointer = Some(egui::PointerButton::Primary);
                 match result {
                     Ok(0) => {}
                     Ok(_) => app.refresh_all(),

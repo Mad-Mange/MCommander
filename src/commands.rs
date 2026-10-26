@@ -456,6 +456,8 @@ pub const KEYBOARD_HELP: &[(&str, &str)] = &[
     ("Ctrl+Alt+Letters", "Quick search (configurable)"),
     ("Enter (command line)", "Run command; cd/md/rd handled internally"),
     ("Click on the path line", "A folder: go there; elsewhere: type or paste a path (Enter)"),
+    ("Right mouse button", "Select / unselect; drag to select several; hold for the context menu"),
+    ("Shift+right click", "Select everything from the last clicked file"),
 ];
 
 #[cfg(test)]

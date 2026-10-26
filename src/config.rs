@@ -85,6 +85,11 @@ pub struct Config {
     pub confirm_delete: bool,
     pub space_calculates_dirs: bool,
     pub num_plus_selects_dirs: bool,
+    /// Total Commander's mouse mode: the right button selects files and
+    /// holding it opens the context menu (false = Explorer style).
+    pub right_button_select: bool,
+    /// How long the right button must be held for the context menu (ms).
+    pub popup_delay_ms: u32,
     pub editor: String,
     pub terminal: String,
     pub font_size: f32,
@@ -129,6 +134,8 @@ impl Default for Config {
             confirm_delete: true,
             space_calculates_dirs: true,
             num_plus_selects_dirs: false,
+            right_button_select: true,
+            popup_delay_ms: 500,
             editor: "notepad.exe".into(),
             terminal: "cmd.exe".into(),
             font_size: 12.5,
@@ -284,6 +291,8 @@ impl Config {
             confirm_delete: b("ConfirmDelete", d.confirm_delete),
             space_calculates_dirs: b("SpaceCalculatesDirs", d.space_calculates_dirs),
             num_plus_selects_dirs: b("NumPlusSelectsDirs", d.num_plus_selects_dirs),
+            right_button_select: b("RightButtonSelect", d.right_button_select),
+            popup_delay_ms: ini.get_i64("Configuration", "PopupDelay").map_or(d.popup_delay_ms, |v| v.clamp(100, 3000) as u32),
             editor: s("Editor", &d.editor),
             terminal: s("Terminal", &d.terminal),
             font_size: ini
@@ -337,6 +346,7 @@ impl Config {
             ("ConfirmDelete", self.confirm_delete),
             ("SpaceCalculatesDirs", self.space_calculates_dirs),
             ("NumPlusSelectsDirs", self.num_plus_selects_dirs),
+            ("RightButtonSelect", self.right_button_select),
             ("ShowToolbar", self.show_toolbar),
             ("ShowDriveButtons", self.show_drive_buttons),
             ("ShowMiddleBar", self.show_middle_bar),
@@ -347,6 +357,7 @@ impl Config {
         for (k, v) in flags {
             ini.set(c, k, v as i32);
         }
+        ini.set(c, "PopupDelay", self.popup_delay_ms);
         ini.set(c, "Editor", &self.editor);
         ini.set(c, "Terminal", &self.terminal);
         ini.set(c, "FontSize", self.font_size);
@@ -414,6 +425,11 @@ impl Config {
         }
         if let Some(v) = ini.get_i64(cfg, "DirBrackets") {
             self.dir_brackets = v & 1 == 1;
+        }
+        // TC's default is the right button; the key is only written when changed.
+        self.right_button_select = ini.get_i64(cfg, "UseRightButton").is_none_or(|v| v != 0);
+        if let Some(v) = ini.get_i64(cfg, "PopupDelay") {
+            self.popup_delay_ms = v.clamp(100, 3000) as u32;
         }
         for (sec, tabs_sec, target) in [("left", "lefttabs", &mut self.left), ("right", "righttabs", &mut self.right)] {
             let mut tabs = Vec::new();
@@ -553,6 +569,14 @@ path=c:\Users\me\Downloads\
         assert_eq!(c.hotlist[0], HotlistEntry { name: "Downloads".into(), path: r"c:\Users\me\Downloads".into() });
         assert_eq!(c.hotlist[1].path, "");
         assert_eq!(c.cmd_history, vec!["code .".to_string(), "cmd".to_string()]);
+        // TC's default mouse mode: the right button selects.
+        assert!(c.right_button_select);
+        c.import_tc(&Ini::parse("[Configuration]
+UseRightButton=0
+PopupDelay=800
+"));
+        assert!(!c.right_button_select);
+        assert_eq!(c.popup_delay_ms, 800);
     }
 
     #[test]
@@ -582,6 +606,8 @@ path=c:\Users\me\Downloads\
         c.cmd_history = vec!["code .".into()];
         c.columns = [90.0, 70.0, 120.0, 44.0];
         c.window = Some([10.0, 20.0, 1100.0, 900.0]);
+        c.right_button_select = false;
+        c.popup_delay_ms = 700;
         let back = Config::from_ini(&Ini::parse(&c.to_ini().to_string()));
         assert_eq!(back.theme, ThemeMode::Dark);
         assert_eq!(back.quick_search, QuickSearchMode::Alt);
@@ -593,6 +619,8 @@ path=c:\Users\me\Downloads\
         assert_eq!(back.cmd_history, c.cmd_history);
         assert_eq!(back.columns, c.columns);
         assert_eq!(back.window, c.window);
+        assert!(!back.right_button_select);
+        assert_eq!(back.popup_delay_ms, 700);
     }
 
     #[test]

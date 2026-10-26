@@ -769,6 +769,12 @@ fn options_ui(ui: &mut Ui, cfg: &mut Config) -> Option<usize> {
             }
         });
         ui.end_row();
+        ui.label("Mouse selection");
+        ui.vertical(|ui| {
+            ui.radio_value(&mut cfg.right_button_select, true, "Right button selects, hold it for the context menu (Total Commander)");
+            ui.radio_value(&mut cfg.right_button_select, false, "Left button with Ctrl/Shift, right button for the context menu (Explorer)");
+        });
+        ui.end_row();
         ui.label("Selection");
         ui.vertical(|ui| {
             ui.checkbox(&mut cfg.space_calculates_dirs, "Space on a directory calculates its size");
