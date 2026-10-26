@@ -1,6 +1,6 @@
 [package]
 name = "mcommander"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "MCommander - a dual-pane file manager for Windows inspired by Total Commander"
 license = "MIT"
@@ -10,7 +10,7 @@ build = "build.rs"
 publish = false
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "accesskit", "clipboard"] }
 raw-window-handle = "0.6"
 egui = "0.37"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
