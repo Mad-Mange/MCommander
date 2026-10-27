@@ -910,8 +910,18 @@ impl App {
             ThemeMode::System => ctx.system_theme() == Some(egui::Theme::Dark),
         };
         if self.applied_dark == Some(dark) {
+            // winit can reset the title bar to the system theme when the window
+            // is restored or moved between monitors, so assert it again.
+            if let Some(h) = self.hwnd {
+                win::set_dark_title_bar(h, dark);
+            }
             return;
         }
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if dark {
+            egui::SystemTheme::Dark
+        } else {
+            egui::SystemTheme::Light
+        }));
         self.applied_dark = Some(dark);
         self.dark = dark;
         self.pal = if dark { Palette::dark() } else { Palette::light() };
@@ -1930,8 +1940,10 @@ impl App {
                 }
             }
             Search => {
-                if self.search.is_none() {
-                    let start = self.atab().loc.host_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
+                let start = self.atab().loc.host_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
+                if let Some(s) = &self.search {
+                    s.reveal(ctx, start);
+                } else {
                     self.search = Some(crate::search::SearchHandle::new(start, self.cfg.search_history.clone(), &self.pal));
                 }
             }
@@ -3119,12 +3131,11 @@ impl eframe::App for App {
         self.viewers.retain(|v| v.show(&ctx, &pal));
         // Search window.
         if let Some(s) = self.search.take() {
-            let mut keep = true;
             for action in s.show(&ctx, &pal) {
                 use crate::search::SearchAction as A;
                 match action {
                     A::None => {}
-                    A::Close => keep = false,
+                    A::Close => s.hide(&ctx),
                     A::GoTo(p) => {
                         if let (Some(dir), Some(name)) = (p.parent(), p.file_name()) {
                             let name = name.to_string_lossy().into_owned();
@@ -3136,7 +3147,7 @@ impl eframe::App for App {
                         let n = items.len();
                         self.go(self.active, Location::Results { title: format!("Search results ({n})"), items: Arc::new(items) }, None);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                        keep = false;
+                        s.hide(&ctx);
                     }
                     A::View(p) => {
                         let id = self.next_viewer;
@@ -3145,10 +3156,12 @@ impl eframe::App for App {
                     }
                 }
             }
-            self.cfg.search_history = s.history();
-            if keep {
-                self.search = Some(s);
+            let history = s.history();
+            if history != self.cfg.search_history {
+                self.cfg.search_history = history;
+                self.save_config();
             }
+            self.search = Some(s);
         }
         let now = Instant::now();
         if !self.delayed.is_empty() {

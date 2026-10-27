@@ -18,6 +18,7 @@ pub struct FtpFs {
     mlsd: bool,
     mfmt: bool,
     home: String,
+    dos: bool,
     /// Set after a cancelled transfer: servers answer ABOR inconsistently
     /// (426 and/or 226, before or after closing the data connection), so
     /// the control connection can't be trusted to be in sync any more.
@@ -77,13 +78,22 @@ impl FtpFs {
             let _ = ftp.opts("UTF8", Some("ON"));
         }
         let home = ftp.pwd().unwrap_or_else(|_| "/".into());
-        let mut fs = FtpFs { mlsd: has("MLSD") || has("MLST"), mfmt: has("MFMT"), home: super::normalize(&home, "/"), ftp, broken: false };
+        // DOS-style servers (embedded devices, for one) answer PWD with `SD0:\`.
+        let dos = home.contains(':') || home.contains('\\');
+        let home = if dos { from_dos(&home) } else { home };
+        let mut fs = FtpFs { mlsd: has("MLSD") || has("MLST"), mfmt: has("MFMT"), home: super::normalize(&home, "/"), dos, ftp, broken: false };
         if !p.remote_dir.is_empty() {
-            let dir = super::normalize(&p.remote_dir, &fs.home);
-            fs.ftp.cwd(&dir).map_err(|e| ConnectError::Other(format!("{dir}: {}", describe(&e))))?;
+            let remote_dir = if dos { from_dos(&p.remote_dir) } else { p.remote_dir.clone() };
+            let dir = super::normalize(&remote_dir, &fs.home);
+            fs.ftp.cwd(&fs.native(&dir)).map_err(|e| ConnectError::Other(format!("{dir}: {}", describe(&e))))?;
             fs.home = dir;
         }
         Ok(fs)
+    }
+
+    /// Server path for an internal `/a/b` path.
+    fn native(&self, path: &str) -> String {
+        if self.dos { to_dos(path) } else { path.to_string() }
     }
 
     fn check(&self) -> io::Result<()> {
@@ -97,16 +107,43 @@ impl FtpFs {
         self.check()?;
         // Changing into the directory first copes with servers that
         // misinterpret paths containing spaces in LIST arguments.
-        self.ftp.cwd(dir).map_err(io_err)?;
+        let dir = self.native(dir);
+        self.ftp.cwd(&dir).map_err(io_err)?;
+        // Some servers (DOS-style ones among them) refuse MLSD with 550, which
+        // otherwise means the folder can't be read; LIST tells the two apart.
+        let mut refused = false;
         if self.mlsd {
             match self.ftp.mlsd(None) {
                 Ok(lines) => return Ok(lines.iter().filter_map(|l| parse_mlsx(l)).collect()),
                 Err(FtpError::UnexpectedResponse(r)) if (500..=504).contains(&r.status.code()) => self.mlsd = false,
+                Err(FtpError::UnexpectedResponse(r)) if r.status.code() == 550 => refused = true,
                 Err(e) => return Err(io_err(e)),
             }
         }
         let lines = self.ftp.list(None).map_err(io_err)?;
+        if refused {
+            self.mlsd = false;
+        }
         Ok(lines.iter().filter_map(|l| parse_list_line(l)).collect())
+    }
+}
+
+/// Internal path for a DOS-style server path: `SD0:\a\b` becomes `/SD0:/a/b`.
+/// Paths without a drive keep their form, so relative ones stay relative.
+fn from_dos(path: &str) -> String {
+    let p = path.replace('\\', "/");
+    if p.contains(':') { format!("/{}", p.trim_matches('/')) } else { p }
+}
+
+/// DOS-style server path for an internal path: `/SD0:/a/b` becomes `SD0:\a\b`,
+/// `/SD0:` the drive's root `SD0:\` and `/a` the server root's `\a`.
+fn to_dos(path: &str) -> String {
+    let s = path.trim_start_matches('/').replace('/', "\\");
+    match s.split('\\').next() {
+        Some(drive) if drive.ends_with(':') => {
+            if s == drive { format!("{s}\\") } else { s }
+        }
+        _ => format!("\\{s}"),
     }
 }
 
@@ -121,7 +158,7 @@ impl RemoteFs for FtpFs {
 
     fn download(&mut self, path: &str, out: &mut dyn Write, progress: Progress) -> io::Result<()> {
         self.check()?;
-        let mut stream = self.ftp.retr_as_stream(path).map_err(io_err)?;
+        let mut stream = self.ftp.retr_as_stream(self.native(path)).map_err(io_err)?;
         match super::copy_with_progress(&mut stream, out, progress) {
             Ok(()) => stream.finish().map_err(io_err),
             Err(e) => {
@@ -134,7 +171,7 @@ impl RemoteFs for FtpFs {
 
     fn upload(&mut self, path: &str, input: &mut dyn Read, progress: Progress) -> io::Result<()> {
         self.check()?;
-        let mut stream = self.ftp.put_with_stream(path).map_err(io_err)?;
+        let mut stream = self.ftp.put_with_stream(self.native(path)).map_err(io_err)?;
         match super::copy_with_progress(input, &mut stream, progress).and_then(|_| stream.flush()) {
             Ok(()) => stream.finish().map_err(io_err),
             Err(e) => {
@@ -147,22 +184,22 @@ impl RemoteFs for FtpFs {
 
     fn mkdir(&mut self, path: &str) -> io::Result<()> {
         self.check()?;
-        self.ftp.mkdir(path).map_err(io_err)
+        self.ftp.mkdir(self.native(path)).map_err(io_err)
     }
 
     fn remove_file(&mut self, path: &str) -> io::Result<()> {
         self.check()?;
-        self.ftp.rm(path).map_err(io_err)
+        self.ftp.rm(self.native(path)).map_err(io_err)
     }
 
     fn remove_dir(&mut self, path: &str) -> io::Result<()> {
         self.check()?;
-        self.ftp.rmdir(path).map_err(io_err)
+        self.ftp.rmdir(self.native(path)).map_err(io_err)
     }
 
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
         self.check()?;
-        self.ftp.rename(from, to).map_err(io_err)
+        self.ftp.rename(self.native(from), self.native(to)).map_err(io_err)
     }
 
     fn set_modified(&mut self, path: &str, time: SystemTime) -> io::Result<()> {
@@ -171,7 +208,7 @@ impl RemoteFs for FtpFs {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "server cannot set file times"));
         }
         let t: chrono::DateTime<chrono::Utc> = time.into();
-        self.ftp.custom_command(format!("MFMT {} {path}", t.format("%Y%m%d%H%M%S")), &[Status::File]).map(|_| ()).map_err(io_err)
+        self.ftp.custom_command(format!("MFMT {} {}", t.format("%Y%m%d%H%M%S"), self.native(path)), &[Status::File]).map(|_| ()).map_err(io_err)
     }
 }
 
@@ -403,5 +440,18 @@ mod tests {
         let f = parse_list_line("04-08-14  03:09PM                  403 readme.txt").unwrap();
         assert_eq!((f.name.as_str(), f.size), ("readme.txt", 403));
         assert!(parse_list_line("total 12").is_none());
+    }
+
+    #[test]
+    fn converts_dos_paths() {
+        assert_eq!(super::super::normalize(&from_dos("SD0:\\"), "/"), "/SD0:");
+        assert_eq!(from_dos("C:\\data\\logs"), "/C:/data/logs");
+        assert_eq!(from_dos("\\"), "/");
+        assert_eq!(from_dos("logs\\2026"), "logs/2026");
+        assert_eq!(super::super::normalize(&from_dos("logs\\2026"), "/SD0:"), "/SD0:/logs/2026");
+        assert_eq!(to_dos("/SD0:"), "SD0:\\");
+        assert_eq!(to_dos("/SD0:/logs/a b.txt"), "SD0:\\logs\\a b.txt");
+        assert_eq!(to_dos("/"), "\\");
+        assert_eq!(to_dos("/data/x"), "\\data\\x");
     }
 }

@@ -56,21 +56,39 @@ impl SearchHandle {
     }
 
     /// Keeps the window alive and returns the actions the user triggered.
+    /// The window is hidden rather than destroyed when closed: destroying its
+    /// GL context crashes some Intel graphics drivers.
     pub fn show(&self, ctx: &egui::Context, pal: &Palette) -> Vec<SearchAction> {
         let actions = {
             let mut w = self.state.lock().unwrap();
             w.pal = pal.clone();
             std::mem::take(&mut w.actions)
         };
-        if actions.iter().any(|a| matches!(a, SearchAction::Close)) {
-            return actions;
-        }
         let builder = ViewportBuilder::default().with_title("Find Files").with_inner_size([780.0, 620.0]).with_min_inner_size([480.0, 360.0]);
         let state = self.state.clone();
         ctx.show_viewport_deferred(self.id, builder, move |ui, _| {
             state.lock().unwrap().ui(ui);
         });
         actions
+    }
+
+    pub fn hide(&self, ctx: &egui::Context) {
+        let mut w = self.state.lock().unwrap();
+        w.cancel();
+        w.hidden = true;
+        ctx.send_viewport_cmd_to(self.id, egui::ViewportCommand::Visible(false));
+    }
+
+    pub fn reveal(&self, ctx: &egui::Context, start: PathBuf) {
+        let mut w = self.state.lock().unwrap();
+        if w.hidden {
+            w.start = start.to_string_lossy().into_owned();
+            w.focus_pattern = true;
+        }
+        w.hidden = false;
+        ctx.send_viewport_cmd_to(self.id, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(self.id, egui::ViewportCommand::Focus);
+        ctx.request_repaint_of(self.id);
     }
 }
 
@@ -93,6 +111,8 @@ pub struct SearchWindow {
     status: String,
     history: Vec<String>,
     focus_pattern: bool,
+    title_dark: Option<bool>,
+    hidden: bool,
 }
 
 impl SearchWindow {
@@ -116,6 +136,8 @@ impl SearchWindow {
             status: String::new(),
             history,
             focus_pattern: true,
+            title_dark: None,
+            hidden: false,
         }
     }
 
@@ -180,14 +202,29 @@ impl SearchWindow {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui) {
+        if self.hidden {
+            return;
+        }
         self.poll();
         let pal = &self.pal.clone();
         let mut action = SearchAction::None;
         {
             let ctx = ui.ctx().clone();
+            let dark = pal.dark;
+            // winit can reset the title bar to the system theme, so assert it every frame.
+            crate::win::set_dark_title_bar_by_title("Find Files", dark);
+            if self.title_dark != Some(dark) {
+                self.title_dark = Some(dark);
+                ctx.send_viewport_cmd_to(
+                    self.id,
+                    egui::ViewportCommand::SetTheme(if dark { egui::SystemTheme::Dark } else { egui::SystemTheme::Light }),
+                );
+            }
             if ctx.input(|i| i.viewport().close_requested()) {
                 self.cancel();
-                self.act(&ctx, SearchAction::Close);
+                self.hidden = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 return;
             }
             if self.running.is_some() {
@@ -270,7 +307,20 @@ impl SearchWindow {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, self.results.len(), |ui, range| {
                         for i in range {
                             let text = self.results[i].to_string_lossy().into_owned();
-                            let resp = ui.add_sized([ui.available_width(), row_h], egui::Button::selectable(i == self.selected, text).frame_when_inactive(false));
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+                            let v = ui.visuals();
+                            let (fill, color) = if i == self.selected {
+                                (Some(v.selection.bg_fill), v.selection.stroke.color)
+                            } else if resp.hovered() {
+                                (Some(v.widgets.hovered.bg_fill), v.text_color())
+                            } else {
+                                (None, v.text_color())
+                            };
+                            if let Some(f) = fill {
+                                ui.painter().rect_filled(rect, 0.0, f);
+                            }
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            ui.painter().with_clip_rect(rect).text(rect.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, text, font, color);
                             if resp.clicked() {
                                 self.selected = i;
                             }

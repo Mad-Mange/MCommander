@@ -599,6 +599,26 @@ pub fn set_dark_title_bar(hwnd: HWND, dark: bool) {
     }
 }
 
+/// Sets the title bar of this process's top-level window with the given title
+/// (child viewports don't expose their handle). Other programs, Total
+/// Commander among them, can have windows with the same title.
+pub fn set_dark_title_bar_by_title(title: &str, dark: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
+    let title = wide(title);
+    let mut after = None;
+    unsafe {
+        while let Ok(hwnd) = FindWindowExW(None, after, PCWSTR::null(), pcwstr(&title)) {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == std::process::id() {
+                set_dark_title_bar(hwnd, dark);
+                return;
+            }
+            after = Some(hwnd);
+        }
+    }
+}
+
 /// Starts a program without blocking; console programs get their own console.
 pub fn spawn_detached(program: &str, args_raw: &str, dir: Option<&Path>) -> std::io::Result<()> {
     const CREATE_NEW_CONSOLE: u32 = 0x10;

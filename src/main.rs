@@ -173,6 +173,17 @@ fn window_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result {
+    // The release build has no console, so record panics for diagnosis.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let line = format!("{} {info}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::temp_dir().join("mcommander-panic.log"))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        default_hook(info);
+    }));
     let (opts, size) = match parse_args() {
         Ok(v) => v,
         Err(msg) => {
