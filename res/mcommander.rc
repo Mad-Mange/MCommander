@@ -1,11 +1,17 @@
 #include <winver.h>
 
+// build.rs passes the version from Cargo.toml.
+#ifndef MC_VERSION
+#define MC_VERSION 0,0,0,0
+#define MC_VERSION_STR "0.0.0"
+#endif
+
 1 ICON "mcommander.ico"
 1 24 "mcommander.exe.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,3,2,0
-PRODUCTVERSION 0,3,2,0
+FILEVERSION MC_VERSION
+PRODUCTVERSION MC_VERSION
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,12 +21,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Mad-Mange"
       VALUE "FileDescription", "MCommander file manager"
-      VALUE "FileVersion", "0.3.2"
+      VALUE "FileVersion", MC_VERSION_STR
       VALUE "InternalName", "MCommander"
       VALUE "LegalCopyright", "MIT License"
       VALUE "OriginalFilename", "MCommander.exe"
       VALUE "ProductName", "MCommander"
-      VALUE "ProductVersion", "0.3.2"
+      VALUE "ProductVersion", MC_VERSION_STR
     END
   END
   BLOCK "VarFileInfo"
