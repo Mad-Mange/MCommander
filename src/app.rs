@@ -192,6 +192,9 @@ pub struct App {
     pub frame_no: u64,
     /// Where a pending context menu should open (pointer position, points).
     pub context_at: Option<Pos2>,
+    /// The pending context menu is for the folder itself (a click on the
+    /// empty area or on ".."): Explorer's background menu with "New".
+    pub context_background: bool,
     /// Screen rectangles of the main menu titles (for keyboard menus).
     pub menu_rects: Vec<egui::Rect>,
     /// A modal loop (OLE drag, shell context menu) swallowed this button's
@@ -295,6 +298,7 @@ impl App {
             cmd_history_popup: false,
             frame_no: 0,
             context_at: None,
+            context_background: false,
             menu_rects: Vec::new(),
             release_pointer: None,
             ppp: 1.0,
@@ -2494,15 +2498,32 @@ impl App {
     /// Explorer's context menu for the selection (or the item under the
     /// cursor, or the current directory on `..`); an internal menu inside
     /// archives.
+    /// After "New > Text Document" and the like: put the cursor on the one
+    /// entry that appeared and rename it in place, as Explorer does.
+    fn rename_new_entry(&mut self, side: Side, before: &HashSet<String>) {
+        let tab = self.tab(side);
+        if tab.loading.is_some() {
+            return;
+        }
+        let new: Vec<usize> = tab.entries.iter().enumerate().filter(|(_, e)| !e.is_parent && !before.contains(&e.name)).map(|(i, _)| i).collect();
+        if let [i] = new[..] {
+            self.active = side;
+            self.tab_mut(side).set_cursor(i);
+            self.start_rename();
+        }
+    }
+
     pub fn open_context_menu(&mut self, at: Option<Pos2>) {
         use Cmd::*;
         let side = self.active;
+        let background = std::mem::take(&mut self.context_background);
         let tab = self.atab();
         if let (Some(hwnd), true) = (self.hwnd, matches!(tab.loc, Location::Fs(_) | Location::Results { .. })) {
-            let mut paths: Vec<PathBuf> = self.sources(side).into_iter().filter_map(|s| if let Source::Fs(p) = s { Some(p) } else { None }).collect();
-            if paths.is_empty() {
-                paths.extend(tab.loc.fs_path().map(Path::to_path_buf));
-            }
+            let mut paths: Vec<PathBuf> = if background {
+                Vec::new()
+            } else {
+                self.sources(side).into_iter().filter_map(|s| if let Source::Fs(p) = s { Some(p) } else { None }).collect()
+            };
             // The shell menu needs items from a single folder.
             if let Some(parent) = paths.first().and_then(|p| p.parent()).map(Path::to_path_buf) {
                 paths.retain(|p| p.parent() == Some(parent.as_path()));
@@ -2515,6 +2536,21 @@ impl App {
             });
             let client = ((point.x * self.ppp) as i32, (point.y * self.ppp) as i32);
             let extended = win::shift_down();
+            if paths.is_empty() {
+                // Nothing selected, or a click beside the files: the folder's
+                // own menu, as on the empty area in Explorer (New, Properties...).
+                let Some(dir) = tab.loc.fs_path().map(Path::to_path_buf) else { return };
+                let before: HashSet<String> = tab.entries.iter().map(|e| e.name.clone()).collect();
+                match win::shell_background_menu(hwnd, &dir, Some(client), extended) {
+                    Ok(win::MenuOutcome::Invoked) => {
+                        self.refresh_all();
+                        self.rename_new_entry(side, &before);
+                    }
+                    Ok(_) => {}
+                    Err(e) => self.toast(format!("Context menu: {e}")),
+                }
+                return;
+            }
             match win::shell_context_menu(hwnd, &paths, Some(client), extended) {
                 Ok(win::MenuOutcome::Rename) => self.start_rename(),
                 Ok(win::MenuOutcome::Invoked) => self.refresh_all(),

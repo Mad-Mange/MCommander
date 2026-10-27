@@ -842,67 +842,100 @@ pub fn drag_files_out(hwnd: HWND, paths: &[PathBuf]) -> Result<u32, String> {
 /// `client_pt` is in physical pixels relative to the window's client area;
 /// `None` uses the mouse position.
 pub fn shell_context_menu(hwnd: HWND, paths: &[PathBuf], client_pt: Option<(i32, i32)>, extended: bool) -> Result<MenuOutcome, String> {
+    use windows::Win32::UI::Shell::IContextMenu;
+    if paths.is_empty() {
+        return Ok(MenuOutcome::Cancelled);
+    }
+    with_shell_items(paths, |folder, children| unsafe {
+        let cm: IContextMenu = folder.GetUIObjectOf(hwnd, children, None)?;
+        track_shell_menu(hwnd, &cm, client_pt, extended)
+    })
+}
+
+/// Shows Explorer's menu for the empty area of a folder (View, Paste,
+/// New > Folder / Text Document / ..., Properties and what other programs add).
+pub fn shell_background_menu(hwnd: HWND, dir: &Path, client_pt: Option<(i32, i32)>, extended: bool) -> Result<MenuOutcome, String> {
+    let cm = folder_background_menu(hwnd, dir)?;
+    unsafe { track_shell_menu(hwnd, &cm, client_pt, extended) }.map_err(|e| e.message())
+}
+
+/// The background context menu of `dir`, from the folder's own view object.
+fn folder_background_menu(hwnd: HWND, dir: &Path) -> Result<windows::Win32::UI::Shell::IContextMenu, String> {
+    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+    use windows::Win32::UI::Shell::{ILFree, IShellFolder, SHBindToObject, SHParseDisplayName};
+    unsafe {
+        let w = wide_path(dir);
+        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+        SHParseDisplayName(pcwstr(&w), None, &mut pidl, 0, None).map_err(|e| format!("{}: {}", dir.display(), e.message()))?;
+        let result = (|| {
+            let folder: IShellFolder = SHBindToObject(None, pidl, None)?;
+            folder.CreateViewObject(hwnd)
+        })();
+        ILFree(Some(pidl));
+        result.map_err(|e| e.message())
+    }
+}
+
+/// Fills a popup menu from `cm`, tracks it at `client_pt` (or the mouse) and
+/// runs the chosen command.
+unsafe fn track_shell_menu(hwnd: HWND, cm: &windows::Win32::UI::Shell::IContextMenu, client_pt: Option<(i32, i32)>, extended: bool) -> windows::core::Result<MenuOutcome> {
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     use windows::Win32::UI::Shell::{
-        CMF_CANRENAME, CMF_EXPLORE, CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
-        CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu,
+        CMF_CANRENAME, CMF_EXPLORE, CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
+        GCS_VERBW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
     };
     use windows::core::{PCSTR, PSTR};
     const CMIC_MASK_UNICODE: u32 = 0x4000;
-    if paths.is_empty() {
-        return Ok(MenuOutcome::Cancelled);
-    }
-    with_shell_items(paths, |folder, children| unsafe {
-        {
-            let cm: IContextMenu = folder.GetUIObjectOf(hwnd, children, None)?;
-            let menu = CreatePopupMenu()?;
-            let flags = CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME | if extended { CMF_EXTENDEDVERBS } else { 0 };
-            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, flags).ok()?;
-            let mut pt = POINT::default();
-            match client_pt {
-                Some((x, y)) => {
-                    pt = POINT { x, y };
-                    let _ = ClientToScreen(hwnd, &mut pt);
-                }
-                None => GetCursorPos(&mut pt)?,
+    unsafe {
+        let menu = CreatePopupMenu()?;
+        let flags = CMF_NORMAL | CMF_EXPLORE | CMF_CANRENAME | if extended { CMF_EXTENDEDVERBS } else { 0 };
+        cm.QueryContextMenu(menu, 0, 1, 0x7FFF, flags).ok()?;
+        let mut pt = POINT::default();
+        match client_pt {
+            Some((x, y)) => {
+                pt = POINT { x, y };
+                let _ = ClientToScreen(hwnd, &mut pt);
             }
-            ACTIVE_MENU.with(|m| *m.borrow_mut() = Some(cm.clone()));
-            let _ = SetForegroundWindow(hwnd);
-            let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0;
-            ACTIVE_MENU.with(|m| *m.borrow_mut() = None);
-            let outcome = if cmd > 0 {
-                let id = (cmd - 1) as usize;
-                let mut verb = [0u16; 64];
-                let is_rename = cm.GetCommandString(id, GCS_VERBW, None, PSTR(verb.as_mut_ptr() as *mut u8), verb.len() as u32).is_ok() && {
-                    let len = verb.iter().position(|&c| c == 0).unwrap_or(0);
-                    String::from_utf16_lossy(&verb[..len]).eq_ignore_ascii_case("rename")
-                };
-                if is_rename {
-                    MenuOutcome::Rename
-                } else {
-                    let info = CMINVOKECOMMANDINFOEX {
-                        cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-                        fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
-                        hwnd,
-                        lpVerb: PCSTR(id as *const u8),
-                        lpVerbW: PCWSTR(id as *const u16),
-                        nShow: SW_SHOWNORMAL.0,
-                        ptInvoke: pt,
-                        ..Default::default()
-                    };
-                    cm.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO)?;
-                    MenuOutcome::Invoked
-                }
-            } else {
-                MenuOutcome::Cancelled
-            };
-            let _ = DestroyMenu(menu);
-            Ok(outcome)
+            None => GetCursorPos(&mut pt)?,
         }
-    })
+        // Submenus such as "New" fill themselves through the menu messages
+        // the window procedure forwards while this menu is open.
+        ACTIVE_MENU.with(|m| *m.borrow_mut() = Some(cm.clone()));
+        let _ = SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0;
+        ACTIVE_MENU.with(|m| *m.borrow_mut() = None);
+        let outcome = if cmd > 0 {
+            let id = (cmd - 1) as usize;
+            let mut verb = [0u16; 64];
+            let is_rename = cm.GetCommandString(id, GCS_VERBW, None, PSTR(verb.as_mut_ptr() as *mut u8), verb.len() as u32).is_ok() && {
+                let len = verb.iter().position(|&c| c == 0).unwrap_or(0);
+                String::from_utf16_lossy(&verb[..len]).eq_ignore_ascii_case("rename")
+            };
+            if is_rename {
+                MenuOutcome::Rename
+            } else {
+                let info = CMINVOKECOMMANDINFOEX {
+                    cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                    fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
+                    hwnd,
+                    lpVerb: PCSTR(id as *const u8),
+                    lpVerbW: PCWSTR(id as *const u16),
+                    nShow: SW_SHOWNORMAL.0,
+                    ptInvoke: pt,
+                    ..Default::default()
+                };
+                cm.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO)?;
+                MenuOutcome::Invoked
+            }
+        } else {
+            MenuOutcome::Cancelled
+        };
+        let _ = DestroyMenu(menu);
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]
@@ -971,5 +1004,62 @@ mod tests {
         .unwrap();
         assert!(ok, "shell data object should offer CF_HDROP");
         assert!(with_shell_items(&[], |_, _| Ok(())).is_err());
+    }
+
+    #[test]
+    fn folder_background_menu_creates_new_items() {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        use windows::Win32::UI::Shell::{CMF_EXPLORE, CMF_NORMAL, CMINVOKECOMMANDINFO, GCS_VERBW, IContextMenu3};
+        use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, GetSubMenu};
+        use windows::core::{Interface, PCSTR, PSTR};
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let cm = folder_background_menu(HWND::default(), dir.path()).unwrap();
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE).ok().unwrap();
+            // Command ids of every submenu item by verb ("NewFolder", ".txt", ...).
+            let mut verbs = Vec::new();
+            for i in 0..GetMenuItemCount(Some(menu)) {
+                let sub = GetSubMenu(menu, i);
+                if sub.is_invalid() {
+                    continue;
+                }
+                // Shell submenus are filled when they open (WM_INITMENUPOPUP).
+                if let Ok(cm3) = cm.cast::<IContextMenu3>() {
+                    let _ = cm3.HandleMenuMsg2(0x0117, WPARAM(sub.0 as usize), LPARAM(i as isize), None);
+                }
+                for j in 0..GetMenuItemCount(Some(sub)) {
+                    let id = GetMenuItemID(sub, j);
+                    if id == 0 || id == u32::MAX {
+                        continue; // separator or nested submenu
+                    }
+                    let mut verb = [0u16; 64];
+                    if cm.GetCommandString(id as usize - 1, GCS_VERBW, None, PSTR(verb.as_mut_ptr() as *mut u8), verb.len() as u32).is_ok() {
+                        let len = verb.iter().position(|&c| c == 0).unwrap_or(0);
+                        verbs.push((String::from_utf16_lossy(&verb[..len]), id));
+                    }
+                }
+            }
+            let new_folder = verbs.iter().find(|(v, _)| v.eq_ignore_ascii_case("NewFolder")).map(|&(_, id)| id);
+            let Some(id) = new_folder else {
+                let _ = DestroyMenu(menu);
+                panic!("no New > Folder in the background menu: {verbs:?}");
+            };
+            // The item is created before InvokeCommand returns, so the panel
+            // can be re-read right away to rename it.
+            let info = CMINVOKECOMMANDINFO {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+                lpVerb: PCSTR((id - 1) as usize as *const u8),
+                nShow: SW_SHOWNORMAL.0,
+                ..Default::default()
+            };
+            cm.InvokeCommand(&info).unwrap();
+            let _ = DestroyMenu(menu);
+            let made: Vec<PathBuf> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.path()).collect();
+            assert!(made.len() == 1 && made[0].is_dir(), "{made:?}");
+        }
     }
 }

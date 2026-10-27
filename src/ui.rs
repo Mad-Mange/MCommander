@@ -555,6 +555,15 @@ fn path_text(app: &mut App, ui: &mut Ui, rect: Rect, text_rect: Rect, side: Side
         painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, pal.header_text);
         x += w;
     }
+    if resp.secondary_clicked() && matches!(app.tab(side).loc, Location::Fs(_)) {
+        // The folder's own menu (New, Properties...), also when the list
+        // has no empty area to click.
+        app.active = side;
+        app.quick = None;
+        app.context_at = resp.interact_pointer_pos();
+        app.context_background = true;
+        app.pending.push(Cmd::ContextMenu);
+    }
     if resp.clicked() {
         app.active = side;
         match target {
@@ -865,6 +874,7 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
             if let Some(i) = hit {
                 app.tab_mut(side).cursor = i;
             }
+            app.context_background = hit.is_none_or(|i| app.tab(side).entries[i].is_parent);
             app.context_at = Some(p);
             app.pending.push(Cmd::ContextMenu);
         }
@@ -1070,6 +1080,7 @@ fn right_button_select(app: &mut App, ui: &Ui, side: Side, list_rect: Rect, inde
         let rs = app.right_sel.take().unwrap();
         if released && rs.start.is_none() && !rs.moved {
             app.context_at = Some(p);
+            app.context_background = true;
             app.pending.push(Cmd::ContextMenu);
         }
         return;
