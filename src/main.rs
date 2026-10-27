@@ -20,6 +20,7 @@ mod remote;
 mod remote_ui;
 mod rename;
 mod search;
+mod septree;
 mod sync;
 mod theme;
 mod thumbs;

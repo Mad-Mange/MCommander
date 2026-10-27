@@ -36,6 +36,10 @@ pub enum ConfirmAction {
 pub enum InputKind {
     MkDir,
     NewFile,
+    /// Rename the folder `App::tree_target` (from a separate tree).
+    TreeRename,
+    /// New folder inside `App::tree_target`.
+    TreeMkDir,
     SelectGroup(bool),
     CustomFilter,
     QuickFilter,
@@ -218,8 +222,9 @@ pub fn draw(app: &mut App, ctx: &Context) {
         }
         Dialog::Input { kind, prompt, text, history, init } => {
             let title = match kind {
-                InputKind::MkDir => "New folder",
+                InputKind::MkDir | InputKind::TreeMkDir => "New folder",
                 InputKind::NewFile => "Edit new file",
+                InputKind::TreeRename => "Rename folder",
                 InputKind::SelectGroup(true) => "Select",
                 InputKind::SelectGroup(false) => "Unselect",
                 InputKind::CustomFilter => "Custom file filter",
@@ -482,7 +487,11 @@ pub fn draw(app: &mut App, ctx: &Context) {
                     let new = (**cfg).clone();
                     let font_changed = new.font_size != app.cfg.font_size;
                     let list_changed = new.show_hidden != app.cfg.show_hidden;
+                    let tree_changed = new.separate_tree != app.cfg.separate_tree;
                     app.cfg = new;
+                    if tree_changed {
+                        app.set_separate_tree(app.cfg.separate_tree);
+                    }
                     if font_changed {
                         crate::app::setup_fonts(ctx, app.cfg.font_size);
                     }
@@ -633,6 +642,39 @@ fn finish_input(app: &mut App, kind: InputKind, value: String) {
                 _ => {}
             }
         }
+        InputKind::TreeRename => {
+            let Some(from) = app.tree_target.take() else { return };
+            let (Some(parent), Some(old)) = (from.parent(), from.file_name()) else { return };
+            let new = value.trim();
+            if new.is_empty() || new == old.to_string_lossy() {
+                return;
+            }
+            if new.contains(['\\', '/']) {
+                app.error(format!("\"{new}\" is not a folder name."));
+                return;
+            }
+            let to = parent.join(new);
+            if to.exists() && !old.to_string_lossy().eq_ignore_ascii_case(new) {
+                app.error(format!("\"{new}\" already exists."));
+                return;
+            }
+            match std::fs::rename(&from, &to) {
+                Ok(()) => app.tree_renamed(&from, &to),
+                Err(e) => app.error(format!("Could not rename \"{}\":\n{e}", old.to_string_lossy())),
+            }
+        }
+        InputKind::TreeMkDir => {
+            let Some(dir) = app.tree_target.take() else { return };
+            let name = value.trim();
+            if name.is_empty() {
+                return;
+            }
+            let target = crate::vfs::resolve_input_path(&dir, name);
+            match std::fs::create_dir_all(&target) {
+                Ok(()) => app.tree_created(&dir, &target),
+                Err(e) => app.error(format!("Could not create {}:\n{e}", target.display())),
+            }
+        }
         InputKind::NewFile => {
             let Some(dir) = app.atab().loc.fs_path().map(|p| p.to_path_buf()) else { return };
             let path = crate::vfs::resolve_input_path(&dir, value.trim());
@@ -764,6 +806,16 @@ fn options_ui(ui: &mut Ui, cfg: &mut Config) -> Option<usize> {
             ui.checkbox(&mut cfg.show_status, "Status lines");
             ui.checkbox(&mut cfg.show_cmdline, "Command line");
             ui.checkbox(&mut cfg.show_fkeys, "Function key buttons");
+        });
+        ui.end_row();
+        ui.label("Separate tree");
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut cfg.separate_tree, 0, "None");
+                ui.radio_value(&mut cfg.separate_tree, 1, "One for both panels");
+                ui.radio_value(&mut cfg.separate_tree, 2, "One for each panel");
+            });
+            ui.checkbox(&mut cfg.tree_follows_cursor, "Open the folder under the tree cursor in the panel");
         });
         ui.end_row();
         ui.label(RichText::new("Operation").strong());

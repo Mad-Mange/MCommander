@@ -6,6 +6,7 @@ use crate::dialogs::{ConfirmAction, Dialog, InputKind};
 use crate::icons::IconCache;
 use crate::ops::{Dest, Job, OpKind, OpRequest, Source};
 use crate::panel::{FileFilter, Panel, Side, Tab, ArchiveCache};
+use crate::septree::{self, TreeAction};
 use crate::theme::Palette;
 use crate::vfs::{self, FileEntry, ListOptions, Location, SortColumn, SortSpec};
 use crate::watch::DirWatcher;
@@ -46,6 +47,8 @@ pub struct DragState {
     pub names: Vec<String>,
     pub start: Pos2,
     pub active: bool,
+    /// Folders dragged from a separate tree (instead of `names`).
+    pub paths: Vec<PathBuf>,
 }
 
 /// Right mouse button held on a file list (Total Commander's selection mode):
@@ -213,6 +216,14 @@ pub struct App {
     pub job_after: HashMap<u64, crate::remote_ui::After>,
     /// Entry to put the cursor on after the next re-read of a panel.
     pub refresh_focus: Option<(Side, String)>,
+    /// Separate folder trees (the first one is also the single tree).
+    pub trees: [crate::septree::DirTree; 2],
+    /// The keyboard is in the separate tree of the active panel.
+    pub tree_focus: bool,
+    pub tree_rects: [egui::Rect; 2],
+    pub tree_actions: Vec<TreeAction>,
+    /// The folder a tree dialog (rename, new folder) works on.
+    pub tree_target: Option<PathBuf>,
 }
 
 pub struct Options {
@@ -309,6 +320,11 @@ impl App {
             edits_checked: Instant::now(),
             job_after: HashMap::new(),
             refresh_focus: None,
+            trees: Default::default(),
+            tree_focus: false,
+            tree_rects: [egui::Rect::NOTHING; 2],
+            tree_actions: Vec::new(),
+            tree_target: None,
             cfg,
         };
         let lo = app.list_opts();
@@ -497,6 +513,12 @@ impl App {
     pub fn refresh(&mut self, side: Side) {
         let lo = self.list_opts();
         let loc = self.tab(side).loc.clone();
+        if let Location::Fs(dir) = &loc {
+            // Its subfolders may have changed too.
+            for t in &mut self.trees {
+                t.invalidate(dir);
+            }
+        }
         if self.is_slow(&loc) {
             if self.tab(side).loading.is_none() {
                 let index = self.panels[side.index()].active;
@@ -703,6 +725,20 @@ impl App {
         for side in [Side::Left, Side::Right] {
             self.tab_mut(side).save_selection();
         }
+        if matches!(req.kind, OpKind::Delete { .. } | OpKind::Move) {
+            // A panel showing a folder that goes away moves to its parent
+            // first (it would hold the folder open, too).
+            for side in [Side::Left, Side::Right] {
+                let Location::Fs(dir) = self.tab(side).loc.clone() else { continue };
+                let parent = req.sources.iter().find_map(|s| match s {
+                    Source::Fs(p) if septree::within(&dir, p) => p.parent().map(Path::to_path_buf),
+                    _ => None,
+                });
+                if let Some(parent) = parent {
+                    self.go(side, Location::fs(parent), None);
+                }
+            }
+        }
         let id = self.next_job;
         self.next_job += 1;
         // Stop watching while a big operation floods change notifications;
@@ -736,6 +772,7 @@ impl App {
                 continue;
             }
             self.refresh_all();
+            self.reload_trees();
             if !p.errors.is_empty() {
                 let mut text = p.errors.iter().take(20).cloned().collect::<Vec<_>>().join("\n");
                 if p.errors.len() > 20 {
@@ -844,6 +881,9 @@ impl App {
         }
         self.icons.poll(ctx);
         self.thumbs.poll(ctx);
+        for t in &mut self.trees {
+            t.poll(ctx);
+        }
         self.poll_jobs();
         if let Some(t) = &self.toast {
             if t.at.elapsed() > Duration::from_secs(4) {
@@ -897,8 +937,21 @@ impl App {
         let file_keys = panel_mode && self.cmdline.is_empty() && !self.cmd_active;
         win::PANEL_KEYS.store(file_keys, Ordering::Relaxed);
 
+        let in_tree = panel_mode && self.focused_tree().is_some();
         for rk in win::take_raw_keys() {
             if !panel_mode {
+                continue;
+            }
+            if in_tree {
+                let action = match rk.vk {
+                    win::VK_NUM_PLUS if !rk.ctrl && !rk.alt => Some(TreeAction::Expand),
+                    win::VK_NUM_MINUS if !rk.ctrl && !rk.alt => Some(TreeAction::Collapse),
+                    0x43 => Some(TreeAction::ClipCopy),
+                    0x58 => Some(TreeAction::ClipCut),
+                    0x56 => Some(TreeAction::ClipPaste),
+                    _ => None,
+                };
+                self.tree_actions.extend(action);
                 continue;
             }
             let cmd = match rk.vk {
@@ -922,6 +975,10 @@ impl App {
         }
         if !panel_mode {
             return;
+        }
+        if let Some((t, _)) = self.focused_tree() {
+            let actions = self.tree_keys(ctx, t);
+            self.tree_actions.extend(actions);
         }
 
         // Left/Right move the cursor in the column-based views.
@@ -1105,6 +1162,92 @@ impl App {
             }
         }
         self.pending.extend(cmds);
+    }
+
+    /// Takes the keys a focused separate tree uses; the rest go on to the
+    /// panel handling (menus, Ctrl shortcuts, Tab...).
+    fn tree_keys(&mut self, ctx: &egui::Context, t: usize) -> Vec<TreeAction> {
+        use TreeAction as A;
+        let quick_open = self.trees[t].quick.is_some();
+        let qs_mode = self.cfg.quick_search;
+        let mut actions = Vec::new();
+        let mut eat_space = false;
+        let mut eat_text = false;
+        ctx.input_mut(|i| {
+            let mods = i.modifiers;
+            i.events.retain(|ev| match ev {
+                Event::Key { key, pressed: true, modifiers: m, .. } => {
+                    let (none, shift, alt) = (!m.any(), m.shift_only(), m.alt && !m.ctrl && !m.shift);
+                    let action = match key {
+                        Key::ArrowUp if none && quick_open => A::QuickStep(-1),
+                        Key::ArrowDown if none && quick_open => A::QuickStep(1),
+                        Key::ArrowUp if none => A::Cursor(-1),
+                        Key::ArrowDown if none => A::Cursor(1),
+                        Key::PageUp if none => A::Page(-1),
+                        Key::PageDown if none => A::Page(1),
+                        Key::Home if none => A::First,
+                        Key::End if none => A::Last,
+                        Key::ArrowLeft if none => A::Left,
+                        Key::ArrowRight if none => A::Right,
+                        Key::Enter if none => {
+                            if quick_open {
+                                actions.push(A::QuickClose);
+                            }
+                            A::Open
+                        }
+                        Key::Enter if alt => A::Properties,
+                        Key::Space if none && !quick_open => {
+                            eat_space = true;
+                            A::Toggle
+                        }
+                        Key::Backspace if none && quick_open => A::QuickBack,
+                        Key::Escape if quick_open => A::QuickClose,
+                        Key::Delete | Key::F8 if none => A::Delete { permanent: false },
+                        Key::Delete | Key::F8 if shift => A::Delete { permanent: true },
+                        Key::F5 if none => A::Transfer { mv: false },
+                        Key::F6 if none => A::Transfer { mv: true },
+                        Key::F6 if shift => A::Rename,
+                        Key::F7 if none => A::MkDir,
+                        Key::F2 if none => A::Reload,
+                        Key::F10 if shift => A::ContextMenu(None),
+                        _ => {
+                            // Ctrl+Alt+letter / Alt+letter quick search, as in the panels.
+                            let trigger = match qs_mode {
+                                QuickSearchMode::CtrlAlt => m.ctrl && m.alt && !m.shift,
+                                QuickSearchMode::Alt => m.alt && !m.ctrl,
+                                _ => false,
+                            };
+                            match letter_of(*key).filter(|_| trigger) {
+                                Some(c) => {
+                                    eat_text = true;
+                                    A::QuickText(c.to_string())
+                                }
+                                None => return true,
+                            }
+                        }
+                    };
+                    actions.push(action);
+                    false
+                }
+                Event::Text(text) => {
+                    if eat_space && text == " " {
+                        eat_space = false;
+                        return false;
+                    }
+                    if eat_text {
+                        return false;
+                    }
+                    // Plain typing searches the tree (Alt/Ctrl text belongs to menus).
+                    if mods.alt || mods.ctrl || text.is_empty() || text.chars().any(char::is_control) {
+                        return true;
+                    }
+                    actions.push(A::QuickText(text.clone()));
+                    false
+                }
+                _ => true,
+            });
+        });
+        actions
     }
 
     /// Moves the cursor to the next entry matching the quick search text.
@@ -1424,6 +1567,25 @@ impl App {
             SwitchPanel => {
                 self.active = other;
                 self.quick = None;
+                self.tree_focus = false;
+            }
+            SeparateTree(n) => self.set_separate_tree(n),
+            SwitchSeparateTree => self.set_separate_tree((self.cfg.separate_tree + 1) % 3),
+            ToggleSeparateTree(n) => self.set_separate_tree(if self.cfg.separate_tree == n { 0 } else { n }),
+            FocusTree(which) => {
+                if self.cfg.separate_tree > 0 {
+                    self.active = which.side(side);
+                    self.tree_focus = true;
+                    self.quick = None;
+                }
+            }
+            ToggleTreeFocus => {
+                if self.cfg.separate_tree > 0 {
+                    self.tree_focus = !self.tree_focus;
+                    self.quick = None;
+                } else {
+                    self.active = other;
+                }
             }
             Open => {
                 let c = self.atab().cursor;
@@ -2100,7 +2262,6 @@ impl App {
         if sources.is_empty() {
             return;
         }
-        let in_archive = sources.iter().any(|s| matches!(s, Source::Archive { .. }));
         if sources.iter().any(|s| matches!(s, Source::Remote { .. })) {
             // Servers have no recycle bin.
             let req = OpRequest { kind: OpKind::Delete { recycle: false }, sources, dest: None, mask: String::new() };
@@ -2117,6 +2278,14 @@ impl App {
             });
             return;
         }
+        let what = self.describe(side);
+        self.confirm_delete(sources, what, permanent);
+    }
+
+    /// Asks (when configured) and deletes local or archive items; `what`
+    /// names them in the question.
+    fn confirm_delete(&mut self, sources: Vec<Source>, what: String, permanent: bool) {
+        let in_archive = sources.iter().any(|s| matches!(s, Source::Archive { .. }));
         // Network shares have no recycle bin: Windows would delete permanently.
         let network = sources.iter().any(|s| match s {
             Source::Fs(p) => {
@@ -2131,7 +2300,6 @@ impl App {
             self.start_job(OpRequest { kind: OpKind::Delete { recycle }, sources, dest: None, mask: String::new() });
             return;
         }
-        let what = self.describe(side);
         let text = if recycle {
             format!("Do you really want to move {what} to the recycle bin?")
         } else if network && !permanent && self.cfg.use_recycle_bin {
@@ -2498,6 +2666,338 @@ impl App {
     /// Explorer's context menu for the selection (or the item under the
     /// cursor, or the current directory on `..`); an internal menu inside
     /// archives.
+    // ---- separate trees ----------------------------------------------------------
+
+    /// The separate tree that has the keyboard, and the panel it follows.
+    pub fn focused_tree(&self) -> Option<(usize, Side)> {
+        if !self.tree_focus {
+            return None;
+        }
+        match self.cfg.separate_tree {
+            1 => Some((0, self.active)),
+            2 => Some((self.active.index(), self.active)),
+            _ => None,
+        }
+    }
+
+    pub fn set_separate_tree(&mut self, n: u8) {
+        self.cfg.separate_tree = n.min(2);
+        if n == 0 {
+            self.tree_focus = false;
+        }
+        for t in &mut self.trees {
+            t.synced = None;
+            t.reload();
+        }
+    }
+
+    pub fn reload_trees(&mut self) {
+        for t in &mut self.trees {
+            t.reload();
+        }
+    }
+
+    /// Top-level entries of the trees: the drives, and the share of a UNC
+    /// path shown in a panel.
+    pub fn tree_roots(&mut self) -> Vec<septree::Root> {
+        let drives: Vec<(char, bool)> = self
+            .drives
+            .iter()
+            .map(|d| (d.letter, matches!(d.kind, win::DriveKind::Network | win::DriveKind::Removable | win::DriveKind::Cdrom | win::DriveKind::Unknown)))
+            .collect();
+        let mut roots = Vec::new();
+        for (letter, slow) in drives {
+            if !self.drive_extra.contains_key(&letter) {
+                self.request_drive_info(letter);
+            }
+            let name = if self.cfg.dir_brackets { format!("[{letter}:]") } else { format!("{letter}:") };
+            let label = match self.drive_extra.get(&letter).and_then(|x| x.label.clone()).filter(|l| !l.is_empty()) {
+                Some(l) => format!("{name}  {l}"),
+                None => name,
+            };
+            roots.push(septree::Root { path: PathBuf::from(format!("{letter}:\\")), label, drive: Some(letter), slow });
+        }
+        for side in [Side::Left, Side::Right] {
+            let Some(dir) = self.tab(side).loc.host_dir().filter(|d| d.to_string_lossy().starts_with("\\\\")) else { continue };
+            let root = vfs::root_of(&dir);
+            if !roots.iter().any(|r| septree::same(&r.path, &root)) {
+                let label = root.to_string_lossy().trim_end_matches('\\').to_string();
+                roots.push(septree::Root { path: root, label, drive: None, slow: true });
+            }
+        }
+        roots
+    }
+
+    /// Shows a folder picked in a separate tree in the panel it belongs to.
+    pub fn tree_open(&mut self, side: Side, dir: &Path) {
+        let shown = match &self.tab(side).loc {
+            Location::Fs(p) => Some(p.clone()),
+            _ => None,
+        };
+        if shown.is_some_and(|s| septree::same(&s, dir)) {
+            return;
+        }
+        self.go(side, Location::fs(dir), None);
+    }
+
+    /// The tree folder under a screen position, if a tree is there.
+    pub fn tree_folder_at(&self, p: Pos2) -> Option<PathBuf> {
+        (0..2).find(|&t| self.tree_rects[t].contains(p)).and_then(|t| self.trees[t].path_at(p))
+    }
+
+    /// Paths of what is being dragged.
+    pub fn dragged_paths(&self, drag: &DragState) -> Vec<PathBuf> {
+        if !drag.paths.is_empty() {
+            return drag.paths.clone();
+        }
+        let tab = self.tab(drag.side);
+        tab.entries.iter().filter(|e| drag.names.contains(&e.name)).filter_map(|e| tab.loc.child_path(e)).collect()
+    }
+
+    /// What a drag moves or copies (dragged panel entries become the selection).
+    pub fn drag_sources(&mut self, drag: &DragState) -> Vec<Source> {
+        if !drag.paths.is_empty() {
+            return drag.paths.iter().cloned().map(Source::Fs).collect();
+        }
+        for e in self.tab_mut(drag.side).entries.iter_mut() {
+            e.selected = drag.names.contains(&e.name);
+        }
+        self.sources(drag.side)
+    }
+
+    /// Offers to copy (or with Shift move) dropped items into a folder;
+    /// nothing happens for a folder dropped onto itself or where it already is.
+    pub fn drop_into_folder(&mut self, sources: Vec<Source>, dest: &Path, mv: bool) {
+        let pointless = sources.iter().all(|s| match s {
+            Source::Fs(p) => septree::within(dest, p) || p.parent().is_some_and(|parent| septree::same(parent, dest)),
+            _ => false,
+        });
+        if sources.is_empty() || pointless {
+            return;
+        }
+        let src_dir = match &sources[0] {
+            Source::Fs(p) => p.parent().map(Path::to_path_buf),
+            _ => None,
+        };
+        self.dialog = Some(Dialog::Transfer {
+            mv,
+            label: format!("{} {} item(s) to:", if mv { "Move" } else { "Copy" }, sources.len()),
+            sources,
+            target: format!("{}*.*", Location::fs(dest).display()),
+            src_dir,
+            init: true,
+        });
+    }
+
+    /// Runs a keyboard or mouse action in the focused separate tree.
+    pub fn tree_action(&mut self, ctx: &egui::Context, action: TreeAction) {
+        use TreeAction as A;
+        let Some((t, side)) = self.focused_tree() else { return };
+        let follows = self.cfg.tree_follows_cursor;
+        let tree = &mut self.trees[t];
+        let n = tree.rows().len();
+        let cur = tree.cursor_index();
+        let path = tree.cursor.clone();
+        let mut moved = false;
+        match action {
+            A::Cursor(_) | A::Page(_) | A::First | A::Last => {
+                if n == 0 {
+                    return;
+                }
+                let page = tree.page_rows.max(1) as isize;
+                let target = match action {
+                    A::Cursor(d) => cur.map_or(0, |c| c as isize + d),
+                    A::Page(d) => cur.map_or(0, |c| c as isize + d * page),
+                    A::First => 0,
+                    _ => n as isize - 1,
+                };
+                tree.set_cursor_index(target.clamp(0, n as isize - 1) as usize);
+                moved = true;
+            }
+            A::Left => {
+                let (Some(p), Some(c)) = (path, cur) else { return };
+                if tree.is_expanded(&p) {
+                    tree.collapse(&p);
+                } else {
+                    let depth = tree.rows()[c].depth;
+                    if let Some(i) = (0..c).rev().find(|&i| tree.rows()[i].depth < depth) {
+                        tree.set_cursor_index(i);
+                        moved = true;
+                    }
+                }
+            }
+            A::Right => {
+                let (Some(p), Some(c)) = (path, cur) else { return };
+                if !tree.is_expanded(&p) {
+                    if tree.has_children(&p) {
+                        tree.expand(&p);
+                    }
+                } else if tree.rows().get(c + 1).map(|r| r.depth) > Some(tree.rows()[c].depth) {
+                    tree.set_cursor_index(c + 1);
+                    moved = true;
+                }
+            }
+            A::Expand | A::Collapse | A::Toggle => {
+                let Some(p) = path else { return };
+                match action {
+                    A::Expand => tree.expand(&p),
+                    A::Collapse => tree.collapse(&p),
+                    _ => tree.toggle(&p),
+                }
+            }
+            A::Open => {
+                tree.open_at = None;
+                if let Some(p) = path {
+                    self.tree_open(side, &p);
+                }
+                return;
+            }
+            A::Reload => {
+                tree.reload();
+                self.refresh(side);
+                return;
+            }
+            A::QuickText(text) => {
+                let q = tree.quick.get_or_insert_with(|| (String::new(), Instant::now()));
+                q.0.push_str(&text);
+                q.1 = Instant::now();
+                let text = q.0.clone();
+                moved = tree.quick_find(&text, 0);
+            }
+            A::QuickBack => {
+                if let Some(q) = &mut tree.quick {
+                    q.0.pop();
+                    q.1 = Instant::now();
+                    if q.0.is_empty() {
+                        tree.quick = None;
+                    }
+                }
+            }
+            A::QuickStep(d) => {
+                if let Some(q) = &mut tree.quick {
+                    q.1 = Instant::now();
+                    let text = q.0.clone();
+                    moved = tree.quick_find(&text, d);
+                }
+            }
+            A::QuickClose => tree.quick = None,
+            other => {
+                if let Some(p) = path {
+                    self.tree_file_action(t, other, p);
+                }
+                return;
+            }
+        }
+        if moved {
+            let tree = &mut self.trees[t];
+            tree.follow = true;
+            tree.open_at = follows.then(|| Instant::now() + septree::OPEN_DELAY);
+            ctx.request_repaint_after(septree::OPEN_DELAY);
+        }
+    }
+
+    /// File operations on the folder under a tree's cursor.
+    fn tree_file_action(&mut self, t: usize, action: TreeAction, p: PathBuf) {
+        use TreeAction as A;
+        let side = self.active;
+        let is_root = p.parent().is_none();
+        let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
+        match action {
+            A::Delete { permanent } if !is_root => self.confirm_delete(vec![Source::Fs(p)], format!("the folder \"{name}\""), permanent),
+            A::Transfer { mv } if !(mv && is_root) => {
+                let target = match &self.tab(side.other()).loc {
+                    Location::Results { .. } => return,
+                    other => format!("{}*.*", other.display()),
+                };
+                self.dialog = Some(Dialog::Transfer {
+                    mv,
+                    label: format!("{} the folder \"{name}\" to:", if mv { "Move" } else { "Copy" }),
+                    src_dir: p.parent().map(Path::to_path_buf),
+                    sources: vec![Source::Fs(p)],
+                    target,
+                    init: true,
+                });
+            }
+            A::Rename if !is_root => {
+                self.tree_target = Some(p);
+                self.dialog = Some(Dialog::input(InputKind::TreeRename, &format!("Rename the folder \"{name}\" to:"), name, Vec::new()));
+            }
+            A::MkDir => {
+                self.dialog = Some(Dialog::input(InputKind::TreeMkDir, &format!("New folder in {}:", p.display()), String::new(), Vec::new()));
+                self.tree_target = Some(p);
+            }
+            A::Properties => win::show_properties(self.hwnd, &p),
+            A::ContextMenu(at) => {
+                let Some(hwnd) = self.hwnd else { return };
+                let point = at.or_else(|| self.trees[t].cursor_pos()).unwrap_or_default();
+                let client = ((point.x * self.ppp) as i32, (point.y * self.ppp) as i32);
+                match win::shell_context_menu(hwnd, std::slice::from_ref(&p), Some(client), win::shift_down()) {
+                    Ok(win::MenuOutcome::Rename) => self.tree_file_action(t, A::Rename, p),
+                    Ok(win::MenuOutcome::Invoked) => {
+                        self.reload_trees();
+                        self.refresh_all();
+                    }
+                    Ok(win::MenuOutcome::Cancelled) => {}
+                    Err(e) => self.toast(format!("Context menu: {e}")),
+                }
+            }
+            A::ClipCopy | A::ClipCut => {
+                let cut = action == A::ClipCut;
+                match win::set_clipboard_files(std::slice::from_ref(&p), cut) {
+                    Ok(()) => self.toast(format!("{} \"{name}\" to the clipboard", if cut { "Cut" } else { "Copied" })),
+                    Err(e) => self.error(format!("Clipboard error: {e}")),
+                }
+            }
+            A::ClipPaste => match win::get_clipboard_files() {
+                Some((files, cut)) if !files.is_empty() => {
+                    self.start_job(OpRequest {
+                        kind: if cut { OpKind::Move } else { OpKind::Copy },
+                        sources: files.into_iter().map(Source::Fs).collect(),
+                        dest: Some(Dest::Dir(p)),
+                        mask: "*.*".into(),
+                    });
+                }
+                _ => self.toast("No files on the clipboard"),
+            },
+            _ => {}
+        }
+    }
+
+    /// A folder was renamed from a tree: panels inside it follow the new name.
+    pub fn tree_renamed(&mut self, from: &Path, to: &Path) {
+        let depth = from.components().count();
+        for side in [Side::Left, Side::Right] {
+            let Location::Fs(dir) = self.tab(side).loc.clone() else { continue };
+            if septree::within(&dir, from) {
+                let mut moved = to.to_path_buf();
+                moved.extend(dir.components().skip(depth));
+                self.go(side, Location::fs(moved), None);
+            }
+        }
+        for t in &mut self.trees {
+            t.reload();
+            if t.cursor.as_deref() == Some(from) {
+                t.cursor = Some(to.to_path_buf());
+                t.follow = true;
+            }
+        }
+        self.refresh_all();
+    }
+
+    /// A folder was made from a tree: show it there.
+    pub fn tree_created(&mut self, parent: &Path, made: &Path) {
+        let focused = self.focused_tree().map(|(t, _)| t);
+        for (i, t) in self.trees.iter_mut().enumerate() {
+            t.invalidate(parent);
+            if Some(i) == focused {
+                t.expand(parent);
+                t.cursor = Some(made.to_path_buf());
+                t.follow = true;
+            }
+        }
+        self.refresh_all();
+    }
+
     /// After "New > Text Document" and the like: put the cursor on the one
     /// entry that appeared and rename it in place, as Explorer does.
     fn rename_new_entry(&mut self, side: Side, before: &HashSet<String>) {
@@ -2658,6 +3158,9 @@ impl eframe::App for App {
             if let Some(next) = self.delayed.iter().map(|(at, _)| *at).min() {
                 ctx.request_repaint_after(next.saturating_duration_since(now));
             }
+        }
+        for action in std::mem::take(&mut self.tree_actions) {
+            self.tree_action(&ctx, action);
         }
         let pending = std::mem::take(&mut self.pending);
         for cmd in pending {

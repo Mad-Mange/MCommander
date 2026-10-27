@@ -110,6 +110,11 @@ impl IconCache {
         self.request(format!(".{ext}"), format!("x.{ext}"), false, true)
     }
 
+    /// The plain folder icon (folder trees).
+    pub fn for_folder(&mut self) -> Option<egui::TextureId> {
+        self.request("<dir>".into(), "folder".into(), true, true)
+    }
+
     pub fn for_drive(&mut self, letter: char) -> Option<egui::TextureId> {
         let root = format!("{letter}:\\");
         self.request(format!("drive:{letter}"), root, true, false)

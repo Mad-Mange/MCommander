@@ -17,6 +17,8 @@ const COLHDR_H: f32 = 19.0;
 const STATUS_H: f32 = 19.0;
 const MIDBAR_W: f32 = 36.0;
 const SCROLL_W: f32 = 16.0;
+/// Gap between a separate tree and what is beside it (drag to resize).
+const TREE_SPLIT: f32 = 5.0;
 
 pub fn row_height(app: &App) -> f32 {
     row_h(app)
@@ -33,6 +35,7 @@ fn font(app: &App) -> FontId {
 pub fn draw(app: &mut App, ui: &mut Ui) {
     let pal = app.pal.clone();
     app.bar_areas = [Rect::NOTHING; 2];
+    app.tree_rects = [Rect::NOTHING; 2];
     egui::Panel::top("menubar")
         .frame(egui::Frame::new().fill(pal.bar).inner_margin(egui::Margin::symmetric(2, 1)))
         .show(ui, |ui| menu_bar(app, ui));
@@ -53,14 +56,25 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             .show(ui, |ui| command_line(app, ui));
     }
     egui::CentralPanel::no_frame().show(ui, |ui| {
-        let full = ui.max_rect();
-        ui.painter().rect_filled(full, 0.0, pal.face);
+        let window = ui.max_rect();
+        ui.painter().rect_filled(window, 0.0, pal.face);
+        // One separate tree: a column at the far left for the active panel.
+        let full = if app.cfg.separate_tree == 1 {
+            let w = tree_width(app, window.width() * 0.5);
+            let tree = Rect::from_min_max(window.min + vec2(2.0, 2.0), pos2(window.left() + 2.0 + w, window.bottom() - 2.0));
+            let side = app.active;
+            crate::septree::draw(app, ui, tree, 0, side);
+            tree_splitter(app, ui, Rect::from_min_max(pos2(tree.right(), window.top()), pos2(tree.right() + TREE_SPLIT, window.bottom())), 0);
+            Rect::from_min_max(pos2(tree.right() + TREE_SPLIT, window.top()), window.max)
+        } else {
+            window
+        };
         if app.cfg.show_drive_buttons {
             // The drive bar strip runs across the whole window, as in TC.
             ui.painter().rect_filled(Rect::from_min_size(full.min, vec2(full.width(), DRIVEBAR_H)), 0.0, pal.bar);
         }
         // Separator under the toolbar, like the Windows toolbar edge.
-        ui.painter().hline(full.x_range(), full.top(), Stroke::new(1.0, pal.border.gamma_multiply(0.5)));
+        ui.painter().hline(window.x_range(), window.top(), Stroke::new(1.0, pal.border.gamma_multiply(0.5)));
         let mid_w = if app.cfg.show_middle_bar { MIDBAR_W } else { 6.0 };
         let avail = full.width() - mid_w;
         let left_w = (avail * app.cfg.divider).round();
@@ -75,7 +89,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
         if let Some(t) = &app.toast {
             let galley = ui.painter().layout_no_wrap(t.text.clone(), font(app), if t.error { pal.error } else { pal.text });
             let size = galley.size() + vec2(20.0, 10.0);
-            let r = Rect::from_center_size(pos2(full.center().x, full.bottom() - 40.0), size);
+            let r = Rect::from_center_size(pos2(window.center().x, window.bottom() - 40.0), size);
             ui.painter().rect(r, 4.0, pal.bar, Stroke::new(1.0, pal.border), StrokeKind::Inside);
             ui.painter().galley(r.min + vec2(10.0, 5.0), galley, pal.text);
         }
@@ -100,6 +114,9 @@ pub fn checked(app: &App, cmd: &Cmd) -> Option<bool> {
         Cmd::BranchView => tab.branch,
         Cmd::QuickFilter => tab.quick_filter.is_some(),
         Cmd::ToggleTheme => app.dark,
+        Cmd::SeparateTree(n) => app.cfg.separate_tree == *n,
+        Cmd::ToggleSeparateTree(n) => app.cfg.separate_tree == *n,
+        Cmd::SwitchSeparateTree => app.cfg.separate_tree > 0,
         _ => return None,
     })
 }
@@ -304,7 +321,15 @@ fn draw_half(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     path_header(app, ui, Rect::from_min_size(pos2(rect.left() + 2.0, y), vec2(rect.width() - 4.0, HEADER_H)), side);
     y += HEADER_H + 1.0;
     let status_h = if app.cfg.show_status { STATUS_H } else { 0.0 };
-    let body = Rect::from_min_max(pos2(rect.left() + 2.0, y), pos2(rect.right() - 2.0, rect.bottom() - status_h - 2.0));
+    let mut body = Rect::from_min_max(pos2(rect.left() + 2.0, y), pos2(rect.right() - 2.0, rect.bottom() - status_h - 2.0));
+    if app.cfg.separate_tree == 2 {
+        // Two separate trees: each panel's tree left of its file list.
+        let w = tree_width(app, body.width() * 0.6);
+        let tree = Rect::from_min_size(body.min, vec2(w, body.height()));
+        crate::septree::draw(app, ui, tree, side.index(), side);
+        tree_splitter(app, ui, Rect::from_min_max(pos2(tree.right(), tree.top()), pos2(tree.right() + TREE_SPLIT, tree.bottom())), 1 + side.index());
+        body.min.x = tree.right() + TREE_SPLIT;
+    }
     let pal = app.pal.clone();
     ui.painter().rect_filled(body, 0.0, pal.list_bg);
     ui.painter().rect_stroke(body, 0.0, Stroke::new(1.0, pal.border), StrokeKind::Outside);
@@ -322,6 +347,25 @@ fn draw_half(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     }
     if app.cfg.show_status {
         status_line(app, ui, Rect::from_min_max(pos2(rect.left() + 2.0, rect.bottom() - STATUS_H), pos2(rect.right() - 2.0, rect.bottom() - 1.0)), side);
+    }
+}
+
+/// Width of a separate tree, leaving room for the files.
+fn tree_width(app: &App, max: f32) -> f32 {
+    app.cfg.tree_width.min(max).max(60.0).round()
+}
+
+/// The gap beside a separate tree: drag it to change the tree's width.
+fn tree_splitter(app: &mut App, ui: &mut Ui, rect: Rect, id: usize) {
+    let resp = ui.interact(rect, egui::Id::unique(("treesplit", id)), Sense::click_and_drag());
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+    }
+    if resp.dragged() {
+        app.cfg.tree_width = (app.cfg.tree_width + resp.drag_delta().x).clamp(60.0, 800.0);
+    }
+    if resp.double_clicked() {
+        app.cfg.tree_width = 160.0;
     }
 }
 
@@ -670,23 +714,25 @@ fn column_header(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     let labels = ["Name", "Ext", "Size", "Date", "Attr"];
     let sorts = [SortColumn::Name, SortColumn::Ext, SortColumn::Size, SortColumn::Date, SortColumn::Attr];
     let sort = app.tab(side).sort;
-    ui.painter().rect_filled(rect, 0.0, pal.col_header_bg);
+    // Columns that don't fit a narrow panel are cut off at its edge.
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 0.0, pal.col_header_bg);
     let mut x = rect.left();
     for i in 0..5 {
         let r = Rect::from_min_size(pos2(x, rect.top()), vec2(cols[i], rect.height()));
-        let resp = ui.interact(r.shrink2(vec2(3.0, 0.0)), egui::Id::unique(("colhdr", side.index(), i)), Sense::click());
+        let resp = ui.interact(r.shrink2(vec2(3.0, 0.0)).intersect(rect), egui::Id::unique(("colhdr", side.index(), i)), Sense::click());
         let sorted = sort.column == sorts[i];
         if sorted {
-            ui.painter().rect_filled(r, 0.0, pal.col_header_sorted);
+            painter.rect_filled(r, 0.0, pal.col_header_sorted);
         } else if resp.hovered() {
-            ui.painter().rect_filled(r, 0.0, pal.hover);
+            painter.rect_filled(r, 0.0, pal.hover);
         }
         let descending = matches!(sorts[i], SortColumn::Size | SortColumn::Date) != sort.reverse;
         let label = if sorted { format!("{}{}", if descending { "\u{2193}" } else { "\u{2191}" }, labels[i]) } else { labels[i].to_string() };
         let align = if i == 2 { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
         let tx = if i == 2 { r.right() - 4.0 } else { r.left() + 4.0 };
-        ui.painter().with_clip_rect(r).text(pos2(tx, r.center().y), align, label, font(app), pal.text);
-        ui.painter().vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, pal.col_sep));
+        painter.with_clip_rect(r.intersect(rect)).text(pos2(tx, r.center().y), align, label, font(app), pal.text);
+        painter.vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, pal.col_sep));
         if resp.clicked() {
             app.active = side;
             app.pending.push(Cmd::SortBy(sorts[i]));
@@ -842,6 +888,7 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
     if resp.clicked() || resp.secondary_clicked() || resp.double_clicked() || resp.drag_started() {
         app.active = side;
         app.quick = None;
+        app.tree_focus = false;
         if app.rename.as_ref().is_some_and(|r| r.side == side) {
             app.finish_rename(true);
         }
@@ -892,7 +939,7 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
                     } else {
                         vec![e.name.clone()]
                     };
-                    app.drag = Some(DragState { side, names, start: p, active: false });
+                    app.drag = Some(DragState { side, names, start: p, active: false, paths: Vec::new() });
                 }
             }
         }
@@ -900,7 +947,8 @@ fn file_list(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
 
     // Rows.
     let painter = ui.painter().with_clip_rect(list_rect);
-    let active_panel = app.active == side;
+    // While its separate tree has the keyboard, the list shows no cursor.
+    let active_panel = app.active == side && app.focused_tree().is_none();
     let renaming = app.rename.as_ref().filter(|r| r.side == side).map(|r| r.index);
     let cols = columns(app, list_rect.width(), side);
     let fnt = font(app);
@@ -1047,6 +1095,7 @@ fn right_button_select(app: &mut App, ui: &Ui, side: Side, list_rect: Rect, inde
     if pressed && ui.rect_contains_pointer(list_rect) {
         app.active = side;
         app.quick = None;
+        app.tree_focus = false;
         if app.rename.as_ref().is_some_and(|r| r.side == side) {
             app.finish_rename(true);
         }
@@ -1194,32 +1243,37 @@ fn draw_thumb_cell(app: &mut App, ui: &Ui, painter: &egui::Painter, r: Rect, e: 
 #[allow(clippy::too_many_arguments)]
 fn scrollbar(app: &mut App, ui: &mut Ui, track: Rect, side: Side, total: usize, visible: usize, vertical: bool, unit: usize) {
     let pal = app.pal.clone();
-    ui.painter().rect_filled(track, 0.0, pal.scrollbar_track);
-    if total <= visible || total == 0 {
-        return;
-    }
     let unit = unit.max(1);
     let pos = app.tab(side).top / unit;
+    if let Some(new_pos) = scroll_track(ui, &pal, egui::Id::unique(("scroll", side.index(), vertical)), track, total, visible, vertical, pos) {
+        app.tab_mut(side).top = new_pos * unit;
+    }
+}
+
+/// A scroll bar in `track` for `total` steps of which `visible` fit, at
+/// `pos`; returns the new position while it is clicked or dragged.
+#[allow(clippy::too_many_arguments)]
+pub fn scroll_track(ui: &mut Ui, pal: &crate::theme::Palette, id: egui::Id, track: Rect, total: usize, visible: usize, vertical: bool, pos: usize) -> Option<usize> {
+    ui.painter().rect_filled(track, 0.0, pal.scrollbar_track);
+    if total <= visible || total == 0 {
+        return None;
+    }
     let len = if vertical { track.height() } else { track.width() };
     let thumb_len = (len * visible as f32 / total as f32).max(20.0);
     let max_pos = total - visible;
-    let offset = (len - thumb_len) * pos as f32 / max_pos as f32;
+    let offset = (len - thumb_len) * pos.min(max_pos) as f32 / max_pos as f32;
     let thumb = if vertical {
         Rect::from_min_size(pos2(track.left() + 3.0, track.top() + offset), vec2(track.width() - 6.0, thumb_len))
     } else {
         Rect::from_min_size(pos2(track.left() + offset, track.top() + 3.0), vec2(thumb_len, track.height() - 6.0))
     };
-    let resp = ui.interact(track, egui::Id::unique(("scroll", side.index(), vertical)), Sense::click_and_drag());
+    let resp = ui.interact(track, id, Sense::click_and_drag());
     let hot = resp.hovered() || resp.dragged();
     ui.painter().rect_filled(thumb, 3.0, if hot { pal.scrollbar_thumb.gamma_multiply(1.3) } else { pal.scrollbar_thumb });
-    if let Some(p) = resp.interact_pointer_pos() {
-        if resp.dragged() || resp.clicked() {
-            let along = if vertical { p.y - track.top() } else { p.x - track.left() };
-            let frac = ((along - thumb_len / 2.0) / (len - thumb_len)).clamp(0.0, 1.0);
-            let new_pos = (frac * max_pos as f32).round() as usize;
-            app.tab_mut(side).top = new_pos * unit;
-        }
-    }
+    let p = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked())?;
+    let along = if vertical { p.y - track.top() } else { p.x - track.left() };
+    let frac = ((along - thumb_len / 2.0) / (len - thumb_len)).clamp(0.0, 1.0);
+    Some((frac * max_pos as f32).round() as usize)
 }
 
 fn status_line(app: &mut App, ui: &mut Ui, rect: Rect, side: Side) {
@@ -1322,7 +1376,11 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
             drag.active = true;
         }
         if drag.active {
-            let text = if drag.names.len() == 1 { drag.names[0].clone() } else { format!("{} items", drag.names.len()) };
+            let text = match (drag.paths.first(), drag.names.len()) {
+                (Some(path), _) => path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned()),
+                (None, 1) => drag.names[0].clone(),
+                (None, n) => format!("{n} items"),
+            };
             let shift = ui.input(|i| i.modifiers.shift);
             let label = format!("{} {}", if shift { "Move" } else { "Copy" }, text);
             let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("dragtip")));
@@ -1338,13 +1396,7 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
     if let (true, false, Some(hwnd), true) = (active, released, app.hwnd, app.steps.is_empty()) {
         if crate::win::cursor_outside(hwnd) {
             let drag = app.drag.take().unwrap();
-            let tab = app.tab(drag.side);
-            let paths: Vec<std::path::PathBuf> = tab
-                .entries
-                .iter()
-                .filter(|e| drag.names.contains(&e.name))
-                .filter_map(|e| tab.loc.child_path(e))
-                .collect();
+            let paths = app.dragged_paths(&drag);
             if !paths.is_empty() {
                 let result = crate::win::drag_files_out(hwnd, &paths);
                 app.release_pointer = Some(egui::PointerButton::Primary);
@@ -1365,10 +1417,15 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
     let shift = ui.input(|i| i.modifiers.shift);
     if app.bar_areas.iter().any(|r| r.contains(p)) {
         // On a button bar: start the button's program with the files.
-        let tab = app.tab(drag.side);
-        let files = tab.entries.iter().filter(|e| drag.names.contains(&e.name)).filter_map(|e| tab.loc.child_path(e)).collect();
+        let files = app.dragged_paths(&drag);
         let ctx = ui.ctx().clone();
         app.drop_on_bar(&ctx, p, files, shift);
+        return;
+    }
+    if let Some(dest) = app.tree_folder_at(p) {
+        // On a separate tree: into the folder under the pointer.
+        let sources = app.drag_sources(&drag);
+        app.drop_into_folder(sources, &dest, shift);
         return;
     }
     // Drop target: a directory row under the pointer, else the panel's directory.
@@ -1385,17 +1442,19 @@ fn draw_drag_overlay(app: &mut App, ui: &mut Ui) {
     let dest_loc = match over_dir {
         Some(e) if e.is_parent => tab.loc.parent().map(|(l, _)| l),
         Some(e) => Some(tab.loc.child_dir(&e.name)),
-        None if ts != drag.side => Some(tab.loc.clone()),
+        // A folder from a tree may also go into its own panel's directory.
+        None if ts != drag.side || !drag.paths.is_empty() => Some(tab.loc.clone()),
         None => None,
     };
     let Some(dest_loc) = dest_loc else { return };
-    // Select the dragged entries so the transfer dialog acts on them.
-    let src = app.tab_mut(drag.side);
-    for e in src.entries.iter_mut() {
-        e.selected = drag.names.contains(&e.name);
+    if let (Some(dir), false) = (dest_loc.fs_path(), drag.paths.is_empty()) {
+        let sources = app.drag_sources(&drag);
+        app.drop_into_folder(sources, &dir.to_path_buf(), shift);
+        return;
     }
+    // Select the dragged entries so the transfer dialog acts on them.
+    let sources = app.drag_sources(&drag);
     app.active = drag.side;
-    let sources = app.sources(drag.side);
     let target = match &dest_loc {
         Location::Fs(_) | Location::Archive { .. } | Location::Remote { .. } => format!("{}*.*", dest_loc.display()),
         _ => return,
@@ -1420,6 +1479,10 @@ fn handle_external_drop(app: &mut App, ui: &mut Ui) {
     if let Some(at) = p.filter(|at| app.bar_areas.iter().any(|r| r.contains(*at))) {
         let (ctx, shift) = (ui.ctx().clone(), ui.input(|i| i.modifiers.shift));
         app.drop_on_bar(&ctx, at, dropped, shift);
+        return;
+    }
+    if let Some(dest) = p.and_then(|at| app.tree_folder_at(at)) {
+        app.drop_into_folder(dropped.into_iter().map(crate::ops::Source::Fs).collect(), &dest, false);
         return;
     }
     let side = p

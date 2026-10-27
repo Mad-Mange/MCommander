@@ -24,6 +24,7 @@ Total Commander's workflow and key layout, rebuilt from scratch, with light and 
 If your hands already know <kbd>F5</kbd> copy, <kbd>F6</kbd> move, <kbd>Tab</kbd> and <kbd>Num +</kbd>, MCommander will feel at home on the first keystroke. It reads your existing Total Commander `wincmd.ini` on first start, so your directory hotlist, command-line history, panel paths, sort order, quick-search style and saved FTP connections come along.
 
 - **Two panels with folder tabs**: full, brief and thumbnail views (Explorer's previews of photos, videos and documents), sortable and resizable columns, history, hotlist and drive buttons. Click a folder in the path line above a panel to jump there, or click beside it to type or paste a path: a folder, a file, a folder inside an archive or an `sftp://` / `ftp://` URL.
+- **Separate folder trees**, as in Total Commander: one tree for the active panel or one beside each panel (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F8</kbd> or **Show > Separate Tree**). A tree opens itself down to its panel's folder, a click shows a folder in the panel, and <kbd>Shift</kbd>+<kbd>Tab</kbd> puts the keyboard in it: arrows to move and open/close branches, letters to search, and F5/F6/F7/F8, <kbd>Shift</kbd>+<kbd>F6</kbd>, <kbd>Alt</kbd>+<kbd>Enter</kbd>, the context menu and the clipboard act on the folder. Drop files on a tree folder to copy them there; a closed folder opens when you hold them over it.
 - **The Total Commander keyboard layout**: F-keys, Num +/-/\*, Ctrl+Alt quick search (or letter-only, as in TC), Ctrl+Left/Right, Ctrl+U and the rest. Press <kbd>F1</kbd> in the app for the full list.
 - **The Total Commander mouse**: the right button selects files (they turn red), dragging with it selects several, and holding it for half a second opens the context menu. Explorer-style selection with the left button is an option.
 - **Background file operations**: copy, move, delete (recycle bin or permanent) and rename on the fly with masks such as `*.bak`. They show progress, speed, cancel and an overwrite dialog (overwrite / skip / older / auto-rename, each with an "all" variant).
@@ -94,6 +95,7 @@ The release build is a single self-contained `mcommander.exe`; copy it anywhere 
 | <kbd>Ctrl</kbd>+<kbd>F1</kbd> / <kbd>F2</kbd> | Brief / full view | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F1</kbd> | Thumbnails view |
 | <kbd>Alt</kbd>+<kbd>F1</kbd> / <kbd>F2</kbd> | Choose drive | <kbd>Ctrl</kbd>+<kbd>U</kbd> | Swap panels |
 | <kbd>Alt</kbd>+<kbd>F10</kbd> | Directory tree | <kbd>Ctrl</kbd>+<kbd>B</kbd> | Branch view (all subfolder files) |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F8</kbd> | Separate tree: one, two, none | <kbd>Shift</kbd>+<kbd>Tab</kbd> | Between the file list and its separate tree |
 | <kbd>F9</kbd> / <kbd>F10</kbd> | Main menu (also <kbd>Alt</kbd>+underlined letter) | <kbd>Shift</kbd>+<kbd>F10</kbd> | Explorer context menu |
 | <kbd>Alt</kbd>+<kbd>Left</kbd> / <kbd>Right</kbd> | Back / forward | <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> | File clipboard (works with Explorer) |
 | <kbd>Ctrl</kbd>+<kbd>F</kbd> | Connect to a saved FTP/SFTP server | <kbd>Ctrl</kbd>+<kbd>N</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> | New connection by URL / disconnect |
@@ -106,13 +108,13 @@ Settings live in `%APPDATA%\MCommander\mcommander.ini`. On the very first start 
 
 Saved FTP/SFTP connections are part of `mcommander.ini`; their passwords are stored in the Windows Credential Manager (as `MCommander:ftp://user@host`). Trusted SSH host keys and accepted FTPS certificates are kept next to the settings in `known_hosts` and `trusted_certs`.
 
-**Configuration > Options** covers the theme (light, dark or follow Windows), font size, which window parts are visible, quick search style, mouse selection mode, recycle bin, delete confirmation, and the editor and terminal commands.
+**Configuration > Options** covers the theme (light, dark or follow Windows), font size, which window parts are visible, the separate trees (and whether the panel follows the tree's cursor), quick search style, mouse selection mode, recycle bin, delete confirmation, and the editor and terminal commands.
 
 The button bars are kept next to the settings as `default.bar` (under the menu) and `vertical.bar` (between the panels), in Total Commander's format. Until you change a bar, MCommander uses its built-in one. **Configuration > Button Bar...** and **Vertical Button Bar...** open the editor, as does a right-click on a bar. The import copies Total Commander's bars and fills in `%COMMANDER_PATH%`; buttons with commands MCommander doesn't have are shown greyed out.
 
 ## How it is built
 
-MCommander is about 20,000 lines of Rust (tests included) in one binary crate:
+MCommander is about 21,000 lines of Rust (tests included) in one binary crate:
 
 | Module | Responsibility |
 |---|---|
@@ -123,6 +125,7 @@ MCommander is about 20,000 lines of Rust (tests included) in one binary crate:
 | `ops/` | Copy/move/delete/pack jobs on worker threads (`CopyFileExW` with progress and cancel), uploads, downloads and server-side operations |
 | `remote/`, `remote_ui.rs` | FTP/FTPS (suppaftp + rustls) and SFTP (russh) behind one blocking interface; host key and certificate trust, saved connections, Credential Manager, the connect dialogs |
 | `viewer.rs`, `search.rs`, `rename.rs`, `sync.rs`, `tree.rs` | Lister, Find Files, Multi-Rename, Synchronize, CD tree |
+| `septree.rs` | Separate folder trees: lazy (and for slow drives background) reading, following the panels, keyboard and drag & drop |
 | `win.rs`, `icons.rs`, `watch.rs` | Win32: drives, shell execution, recycle bin, clipboard, context menu, icons, keyboard hook, change notifications |
 | `buttonbar.rs`, `bar_ui.rs`, `params.rs` | Button bars in TC's `.bar` format, their editor, and the `%P%N` parameter placeholders |
 | `config.rs`, `ini.rs` | Settings and the `wincmd.ini` import |

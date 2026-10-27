@@ -299,7 +299,7 @@ pub fn cmd_icon(cmd: &Cmd) -> Option<Icon> {
         FtpConnect | FtpNew | FtpDisconnect | MapNetworkDrive | DisconnectNetworkDrive | NetworkDrives => Icon::Network,
         Parent | Root => Icon::ParentDir,
         OpenDesktop | OpenExplorer => Icon::Folder,
-        CdTree => Icon::Tree,
+        CdTree | SeparateTree(_) | SwitchSeparateTree | ToggleSeparateTree(_) | FocusTree(_) | ToggleTreeFocus => Icon::Tree,
         Options | ConfigureBar(_) | ImportTc | SaveSettings => Icon::Gear,
         _ => return None,
     })

@@ -103,6 +103,12 @@ pub struct Config {
     pub columns: [f32; 4],
     /// Left panel share of the width (0..1).
     pub divider: f32,
+    /// Separate folder trees: 0 none, 1 one for the active panel, 2 one per panel.
+    pub separate_tree: u8,
+    /// Width of a separate tree (points).
+    pub tree_width: f32,
+    /// The panel follows the cursor of a separate tree (after a short rest).
+    pub tree_follows_cursor: bool,
     pub window: Option<[f32; 4]>,
     pub maximized: bool,
     pub left: PanelConfig,
@@ -147,6 +153,9 @@ impl Default for Config {
             show_status: true,
             columns: [100.0, 82.0, 108.0, 40.0],
             divider: 0.5,
+            separate_tree: 0,
+            tree_width: 160.0,
+            tree_follows_cursor: true,
             window: None,
             maximized: false,
             left: PanelConfig::new(format!("{home}\\")),
@@ -312,6 +321,13 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.5f32)
                 .clamp(0.1, 0.9),
+            separate_tree: ini.get_i64("Layout", "SeparateTree").map_or(d.separate_tree, |v| v.clamp(0, 2) as u8),
+            tree_width: ini
+                .get("Layout", "SeparateTreeWidth")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.tree_width)
+                .clamp(60.0, 800.0),
+            tree_follows_cursor: b("TreeFollowsCursor", d.tree_follows_cursor),
             window,
             maximized: ini.get_bool("Layout", "maximized", false),
             left: panel("Left", &d.left),
@@ -353,6 +369,7 @@ impl Config {
             ("ShowCmdLine", self.show_cmdline),
             ("ShowFKeys", self.show_fkeys),
             ("ShowStatus", self.show_status),
+            ("TreeFollowsCursor", self.tree_follows_cursor),
         ];
         for (k, v) in flags {
             ini.set(c, k, v as i32);
@@ -367,6 +384,8 @@ impl Config {
         let l = "Layout";
         ini.set(l, "columns", self.columns.iter().map(|w| format!("{w:.0}")).collect::<Vec<_>>().join(","));
         ini.set(l, "divider", format!("{:.4}", self.divider));
+        ini.set(l, "SeparateTree", self.separate_tree);
+        ini.set(l, "SeparateTreeWidth", format!("{:.0}", self.tree_width));
         if let Some(w) = self.window {
             ini.set(l, "window", format!("{:.0},{:.0},{:.0},{:.0}", w[0], w[1], w[2], w[3]));
         }
@@ -430,6 +449,12 @@ impl Config {
         self.right_button_select = ini.get_i64(cfg, "UseRightButton").is_none_or(|v| v != 0);
         if let Some(v) = ini.get_i64(cfg, "PopupDelay") {
             self.popup_delay_ms = v.clamp(100, 3000) as u32;
+        }
+        if let Some(v) = ini.get_i64(cfg, "SeparateTree") {
+            self.separate_tree = v.clamp(0, 2) as u8;
+        }
+        if let Some(v) = ini.get_i64(cfg, "SeparateTreeWidth") {
+            self.tree_width = (v as f32).clamp(60.0, 800.0);
         }
         for (sec, tabs_sec, target) in [("left", "lefttabs", &mut self.left), ("right", "righttabs", &mut self.right)] {
             let mut tabs = Vec::new();

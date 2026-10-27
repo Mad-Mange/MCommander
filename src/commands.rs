@@ -82,6 +82,16 @@ pub enum Cmd {
     CompareDirs,
     SyncDirs,
     CdTree,
+    /// Separate folder trees: 0 none, 1 one for both panels, 2 one per panel.
+    SeparateTree(u8),
+    /// Cycle through one tree, two trees and none (Ctrl+Shift+F8).
+    SwitchSeparateTree,
+    /// Turn n separate trees on, or off when they are shown.
+    ToggleSeparateTree(u8),
+    /// Put the keyboard into a separate tree.
+    FocusTree(PanelRef),
+    /// Between the file list and its separate tree (Shift+Tab).
+    ToggleTreeFocus,
     // File operations
     View,
     Edit,
@@ -142,6 +152,27 @@ pub enum Cmd {
     MenuOpen(usize),
 }
 
+/// Which panel a command means: a fixed side, or the source (active) or
+/// target panel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PanelRef {
+    Left,
+    Right,
+    Source,
+    Target,
+}
+
+impl PanelRef {
+    pub fn side(self, active: Side) -> Side {
+        match self {
+            PanelRef::Left => Side::Left,
+            PanelRef::Right => Side::Right,
+            PanelRef::Source => active,
+            PanelRef::Target => active.other(),
+        }
+    }
+}
+
 /// An internal command as Total Commander names it in button bars, menus and
 /// on the command line (`cm_Copy`), with its number from TC's totalcmd.inc.
 pub struct TcCommand {
@@ -174,6 +205,16 @@ pub fn tc_commands() -> &'static [TcCommand] {
             c("cm_LeftOpenDrives", 131, DriveMenu(Side::Left), "Open the left drive list"),
             c("cm_RightOpenDrives", 231, DriveMenu(Side::Right), "Open the right drive list"),
             c("cm_CDtree", 500, CdTree, "Directory tree"),
+            c("cm_SeparateTreeOff", 3200, SeparateTree(0), "No separate tree"),
+            c("cm_SeparateTree1", 3201, SeparateTree(1), "One separate tree for both panels"),
+            c("cm_SeparateTree2", 3202, SeparateTree(2), "Two separate trees, one for each panel"),
+            c("cm_SwitchSeparateTree", 3203, SwitchSeparateTree, "Switch through separate tree options"),
+            c("cm_ToggleSeparateTree1", 3204, ToggleSeparateTree(1), "One separate tree on/off"),
+            c("cm_ToggleSeparateTree2", 3205, ToggleSeparateTree(2), "Two separate trees on/off"),
+            c("cm_FocusLeftTree", 4007, FocusTree(PanelRef::Left), "Focus the left separate tree"),
+            c("cm_FocusRightTree", 4008, FocusTree(PanelRef::Right), "Focus the right separate tree"),
+            c("cm_FocusSrcTree", 4009, FocusTree(PanelRef::Source), "Focus the source separate tree"),
+            c("cm_FocusTrgTree", 4010, FocusTree(PanelRef::Target), "Focus the target separate tree"),
             c("cm_SearchFor", 501, Search, "Find files"),
             c("cm_SetAttrib", 502, Attributes, "Change attributes"),
             c("cm_GetFileSpace", 503, OccupiedSpace, "Calculate occupied space"),
@@ -320,6 +361,8 @@ pub fn map_key(key: Key, m: Modifiers, kc: KeyCtx) -> Option<Cmd> {
         Key::ArrowRight if none && empty && kc.brief => Right,
         Key::ArrowRight if none && empty => FocusCmdLine,
         Key::Tab if none => SwitchPanel,
+        Key::Tab if shift => ToggleTreeFocus,
+        Key::F8 if ctrl_shift => SwitchSeparateTree,
         Key::Tab if ctrl => NextTab,
         Key::Tab if ctrl_shift => PrevTab,
         Key::Enter if none && empty => Open,
@@ -490,6 +533,9 @@ pub fn main_menu() -> Vec<(&'static str, Vec<MenuItem>)> {
                 item("Full", "Ctrl+F2", Full),
                 item("Thumbnails", "Ctrl+Shift+F1", Thumbnails),
                 item("Quick View Panel", "Ctrl+Q", QuickView),
+                item("Separate Tree: None", "", SeparateTree(0)),
+                item("Separate Tree: One For Both Panels", "", SeparateTree(1)),
+                item("Separate Tree: Two, One For Each Panel", "", SeparateTree(2)),
                 item("New Folder Tab", "Ctrl+T", NewTab),
                 SEP,
                 item("All Files", "Ctrl+F10", ShowAll),
@@ -589,6 +635,9 @@ pub const KEYBOARD_HELP: &[(&str, &str)] = &[
     ("Shift+F4", "Create new text file and edit"),
     ("Shift+F10", "Context menu"),
     ("Tab", "Switch between panels"),
+    ("Shift+Tab", "Switch between the file list and its separate tree"),
+    ("Ctrl+Shift+F8", "Separate tree: one, two, none"),
+    ("In a separate tree", "Arrows move and open/close, Enter or a click opens the folder in the panel, Num +/- open/close, letters search, F5/F6/F8/Shift+F6/F7, Alt+Enter, Shift+F10, Ctrl+C/X/V act on the folder"),
     ("Insert / Space", "Select file (Space also counts directory size)"),
     ("Num + / Num - / Num *", "Select group / unselect group / invert"),
     ("Ctrl+Num + / Ctrl+Num -", "Select all / unselect all"),
@@ -645,6 +694,16 @@ mod tests {
         assert_eq!(map_key(Key::F, Modifiers::CTRL, CTX), Some(Cmd::FtpConnect));
         assert_eq!(map_key(Key::F, Modifiers::CTRL | Modifiers::SHIFT, CTX), Some(Cmd::FtpDisconnect));
         assert_eq!(map_key(Key::N, Modifiers::CTRL, CTX), Some(Cmd::FtpNew));
+        assert_eq!(map_key(Key::F8, Modifiers::CTRL | Modifiers::SHIFT, CTX), Some(Cmd::SwitchSeparateTree));
+        assert_eq!(map_key(Key::Tab, Modifiers::SHIFT, CTX), Some(Cmd::ToggleTreeFocus));
+    }
+
+    #[test]
+    fn separate_tree_commands_by_name_and_number() {
+        assert_eq!(tc_command("cm_SwitchSeparateTree").map(|c| c.id), Some(3203));
+        assert_eq!(tc_command("3202").map(|c| c.cmd.clone()), Some(Cmd::SeparateTree(2)));
+        assert_eq!(tc_command("cm_focustrgtree").map(|c| c.cmd.clone()), Some(Cmd::FocusTree(PanelRef::Target)));
+        assert_eq!(PanelRef::Target.side(Side::Left), Side::Right);
     }
 
     #[test]
